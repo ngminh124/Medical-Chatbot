@@ -75,9 +75,9 @@ def search_vectors(
 ):
     try:
         client = get_qdrant_client()
-        search_result = client.search(
+        search_result = client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
         )
         results = [
@@ -87,7 +87,7 @@ def search_vectors(
                 "title": point.payload.get("title", ""),
                 "content": point.payload.get("content", ""),
             }
-            for point in search_result
+            for point in search_result.points
         ]
         logger.info(
             f"Search in collection {collection_name} returned {len(results)} results"
@@ -132,9 +132,9 @@ def search_vectors_for_hybrid(
         client = get_qdrant_client()
 
         # TODO: Implement filters when Qdrant payload filtering is added
-        search_result = client.search(
+        search_result = client.query_points(
             collection_name=collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=top_k,
         )
 
@@ -151,7 +151,7 @@ def search_vectors_for_hybrid(
                 "doc_type": point.payload.get("doc_type", ""),
                 "source": point.payload.get("source", ""),
             }
-            for point in search_result
+            for point in search_result.points
         ]
 
         logger.debug(f"Vector search returned {len(results)} results for hybrid search")
