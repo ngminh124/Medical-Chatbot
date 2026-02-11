@@ -473,7 +473,7 @@ def analyze_chunk_lengths(chunks: List[Dict]):
 def main():
     """Hàm main."""
     
-    JSONL_FILE = "/home/nguyenminh/Projects/Vietnamese-Medical-Chatbot/data/chunks/medical_master_data5.jsonl"
+    JSONL_FILE = "/home/nguyenminh/Projects/Vietnamese-Medical-Chatbot/data/chunks/medical_master_data6.jsonl"
     
     console.print()
     console.print(Panel(
