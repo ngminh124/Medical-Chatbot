@@ -13,6 +13,7 @@ import json
 import sys
 from pathlib import Path
 from typing import Dict, Iterator, List
+import time
 
 from loguru import logger
 from tqdm import tqdm
@@ -24,6 +25,10 @@ from backend.src.services.embedding import get_embedding_service, Qwen3Embedding
 
 # Lấy settings
 settings = get_backend_settings()
+
+# Checkpoint directory
+CHECKPOINT_DIR = Path("/home/nguyenminh/Projects/Vietnamese-Medical-Chatbot/data/checkpoints")
+CHECKPOINT_DIR.mkdir(exist_ok=True, parents=True)
 
 
 class JSONLIngestion:
@@ -49,6 +54,9 @@ class JSONLIngestion:
         self.collection_name = collection_name or settings.default_collection_name
         self.embedding_batch_size = embedding_batch_size
         self.upsert_batch_size = upsert_batch_size
+        
+        # Checkpoint file
+        self.checkpoint_file = CHECKPOINT_DIR / f"checkpoint_{self.collection_name}.json"
 
         # Validate file exists
         if not self.jsonl_path.exists():
@@ -153,15 +161,111 @@ class JSONLIngestion:
 
         return points
 
+    def save_checkpoint(self, processed_count: int, total_chunks: int):
+        """
+        Lưu checkpoint tiến độ hiện tại
+
+        Args:
+            processed_count: Số chunks đã xử lý
+            total_chunks: Tổng số chunks
+        """
+        checkpoint = {
+            "jsonl_path": str(self.jsonl_path),
+            "collection_name": self.collection_name,
+            "processed_count": processed_count,
+            "total_chunks": total_chunks,
+            "progress_percent": (processed_count / total_chunks * 100) if total_chunks > 0 else 0,
+            "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        
+        try:
+            with open(self.checkpoint_file, "w", encoding="utf-8") as f:
+                json.dump(checkpoint, f, indent=2, ensure_ascii=False)
+            logger.info(f"💾 Lưu checkpoint: {processed_count}/{total_chunks} chunks")
+        except Exception as e:
+            logger.error(f"Lỗi lưu checkpoint: {e}")
+
+    def load_checkpoint(self) -> int:
+        """
+        Tải checkpoint từ file trước đó
+
+        Returns:
+            Số chunks đã xử lý trước đó (0 nếu không có checkpoint)
+        """
+        if not self.checkpoint_file.exists():
+            logger.info("Không tìm thấy checkpoint, bắt đầu từ đầu")
+            return 0
+        
+        try:
+            with open(self.checkpoint_file, "r", encoding="utf-8") as f:
+                checkpoint = json.load(f)
+            
+            processed = checkpoint.get("processed_count", 0)
+            total = checkpoint.get("total_chunks", 0)
+            progress = checkpoint.get("progress_percent", 0)
+            timestamp = checkpoint.get("timestamp", "unknown")
+            
+            logger.info(f"📂 Tìm thấy checkpoint từ {timestamp}")
+            logger.info(f"📍 Đã xử lý: {processed}/{total} chunks ({progress:.1f}%)")
+            logger.info(f"⏸️  Resume từ chunk thứ {processed}")
+            
+            return processed
+        except Exception as e:
+            logger.error(f"Lỗi tải checkpoint: {e}")
+            return 0
+
+    def read_jsonl_batches_resumed(
+        self, batch_size: int, start_from: int
+    ) -> Iterator[tuple[List[Dict], int, int]]:
+        """
+        Đọc file JSONL theo batch, có thể bắt đầu từ một vị trí nhất định
+
+        Args:
+            batch_size: Kích thước mỗi batch
+            start_from: Chunk index để bắt đầu từ đó (0-indexed)
+
+        Yields:
+            Tuple (batch_data, start_index, end_index)
+        """
+        batch = []
+        line_count = 0
+
+        with open(self.jsonl_path, "r", encoding="utf-8") as f:
+            for line in f:
+                # Bỏ qua các dòng trước vị trí resume
+                if line_count < start_from:
+                    line_count += 1
+                    continue
+                
+                try:
+                    data = json.loads(line.strip())
+                    batch.append(data)
+                    line_count += 1
+
+                    if len(batch) >= batch_size:
+                        yield batch, line_count - len(batch), line_count - 1
+                        batch = []
+
+                except json.JSONDecodeError as e:
+                    logger.warning(f"Lỗi parse JSON tại dòng {line_count + 1}: {e}")
+                    line_count += 1
+                    continue
+
+            # Yield batch cuối cùng
+            if batch:
+                yield batch, line_count - len(batch), line_count - 1
+
     def ingest(self):
         """
         Thực hiện quá trình ingest dữ liệu vào Qdrant
 
         Quy trình:
         1. Tạo collection nếu chưa có
-        2. Đọc JSONL theo batch
-        3. Tạo embedding cho mỗi batch
-        4. Gom points và upsert vào Qdrant
+        2. Tải checkpoint nếu có
+        3. Đọc JSONL theo batch từ vị trí checkpoint
+        4. Tạo embedding cho mỗi batch
+        5. Gom points và upsert vào Qdrant
+        6. Lưu checkpoint sau mỗi upsert
         """
         logger.info("=" * 80)
         logger.info("Bắt đầu quá trình INGEST")
@@ -181,16 +285,26 @@ class JSONLIngestion:
             logger.warning("Không có chunks để xử lý!")
             return
 
-        # Bước 3: Xử lý dữ liệu theo batch
+        # Bước 3: Tải checkpoint
+        start_from = self.load_checkpoint()
+        remaining_chunks = total_chunks - start_from
+
+        if remaining_chunks == 0:
+            logger.success("✓ Tất cả chunks đã được xử lý hoàn toàn!")
+            return
+
+        logger.info(f"📊 Còn {remaining_chunks:,} chunks cần xử lý")
+
+        # Bước 4: Xử lý dữ liệu theo batch
         logger.info("Bước 2: Bắt đầu xử lý batch...")
 
         points_buffer = []  # Buffer để gom points trước khi upsert
-        processed_count = 0
+        processed_count = start_from
 
-        with tqdm(total=total_chunks, desc="Ingesting chunks") as pbar:
-            # Đọc JSONL theo embedding batch size
-            for batch, start_idx, end_idx in self.read_jsonl_batches(
-                self.embedding_batch_size
+        with tqdm(total=remaining_chunks, desc="Ingesting chunks", initial=0) as pbar:
+            # Đọc JSONL theo embedding batch size, bắt đầu từ checkpoint
+            for batch, start_idx, end_idx in self.read_jsonl_batches_resumed(
+                self.embedding_batch_size, start_from=start_from
             ):
 
                 # Trích xuất content để tạo embedding
@@ -221,10 +335,13 @@ class JSONLIngestion:
                             points_buffer[: self.upsert_batch_size],
                             collection_name=self.collection_name,
                         )
-                        logger.info(
-                            f"✓ Đã nạp {processed_count}/{total_chunks} chunks "
-                            f"({processed_count/total_chunks*100:.1f}%)"
+                        logger.success(
+                            f"✓ Upserted {self.upsert_batch_size} points. Total: {processed_count}"
                         )
+                        
+                        # Lưu checkpoint sau mỗi upsert thành công
+                        self.save_checkpoint(processed_count, total_chunks)
+                        
                         points_buffer = points_buffer[self.upsert_batch_size :]
                     except Exception as e:
                         logger.error(f"Lỗi upsert batch: {e}")
@@ -237,15 +354,19 @@ class JSONLIngestion:
         if points_buffer:
             try:
                 upsert_points(points_buffer, collection_name=self.collection_name)
-                logger.info(
-                    f"✓ Đã nạp {processed_count}/{total_chunks} chunks (100.0%)"
+                processed_count = total_chunks  # Cập nhật để indicate hoàn tất
+                logger.success(
+                    f"✓ Upserted {len(points_buffer)} points. Total: {processed_count}"
                 )
+                
+                # Lưu checkpoint cuối cùng
+                self.save_checkpoint(processed_count, total_chunks)
             except Exception as e:
                 logger.error(f"Lỗi upsert batch cuối: {e}")
                 raise
 
         logger.success("=" * 80)
-        logger.success(f"HOÀN THÀNH! Đã nạp {processed_count:,} chunks thành công")
+        logger.success(f"✅ HOÀN THÀNH! Đã nạp {processed_count:,} chunks thành công")
         logger.success("=" * 80)
 
 
@@ -255,7 +376,7 @@ def main():
     logger.remove()
     logger.add(
         sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | <level>{level: <8}</level> | <level>{message}</level>",
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level: <8}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>",
         level="INFO",
     )
 
@@ -269,7 +390,7 @@ def main():
         # Khởi tạo ingestion
         ingestion = JSONLIngestion(
             jsonl_path=jsonl_path,
-            embedding_batch_size=64,  # Batch cho embedding
+            embedding_batch_size=4,  # Batch cho embedding
             upsert_batch_size=500,  # Batch cho upsert
         )
 
@@ -277,8 +398,9 @@ def main():
         ingestion.ingest()
 
     except KeyboardInterrupt:
-        logger.warning("\n⚠ Quá trình bị ngắt bởi người dùng")
-        sys.exit(1)
+        logger.warning("\n⚠️  Quá trình bị dừng bởi người dùng (Ctrl+C)")
+        logger.info("💾 Checkpoint đã được lưu. Chạy lại để tiếp tục từ vị trí này.")
+        sys.exit(0)
     except Exception as e:
         logger.error(f"❌ Lỗi trong quá trình ingest: {e}")
         logger.exception("Chi tiết lỗi:")
