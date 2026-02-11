@@ -54,7 +54,7 @@ class Qwen3EmbeddingService:
             self.local_url = local_url or settings.backend_api_url
 
         self.task_instruction = task_instruction or self.DEFAULT_TASK_INSTRUCTION
-        self.client = httpx.Client(timeout=30.0)
+        self.client = httpx.Client(timeout=120.0)
 
         logger.info(f"Qwen3EmbeddingService initialized with URL: {self.local_url}")
 
