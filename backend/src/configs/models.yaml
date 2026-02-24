@@ -1,0 +1,47 @@
+# ============================================================
+# Vietnamese Medical RAG System — Model Configuration
+# ============================================================
+# This file is the single source of truth for all model IDs,
+# serving endpoints, and runtime thresholds.
+#
+# Loaded by: backend/src/core/model_config.py
+#
+# Architecture:
+#   All 3 Qwen3 models are served via a single GPU microservice
+#   at serving/qwen3_models/app.py on port 7860:
+#     POST /v1/models/embed   → Qwen3-Embedding-0.6B
+#     POST /v1/models/rerank  → Qwen3-Reranker-0.6B  (FP16)
+#     POST /v1/models/guard   → Qwen3Guard-Gen-0.6B  (FP16)
+#   LLM generation is served separately via vLLM on port 8000.
+# ============================================================
+
+models:
+  # ── Text Generation (served via vLLM on port 8000) ─────────
+  generation:
+    active: "Qwen/Qwen3-4B"
+    description: "Main LLM for answer generation, served by vLLM"
+
+  # ── Embedding (served via GPU service on port 7860) ────────
+  embedding:
+    active: "Qwen/Qwen3-Embedding-0.6B"
+    dimension: 1024
+    description: "Embedding model served by serving/qwen3_models/app.py"
+
+  # ── Reranking (served via GPU service on port 7860, FP16) ──
+  reranking:
+    active: "Qwen/Qwen3-Reranker-0.6B"
+    max_length: 1024
+    description: "Causal-LM reranker with yes/no token scoring (FP16)"
+
+  # ── Guardrails (served via GPU service on port 7860, FP16) ─
+  guardrails:
+    active: "Qwen/Qwen3Guard-Gen-0.6B"
+    threshold: 0.5
+    max_new_tokens: 64
+    description: "Safety guard with 3-tier severity and 9 categories (FP16)"
+
+# ── Serving endpoints ───────────────────────────────────────
+serving:
+  vllm_url: "http://localhost:8000/v1"
+  vllm_api_key: ""
+  embedding_url: "http://localhost:7860"
