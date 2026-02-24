@@ -1,0 +1,33 @@
+# Core dependencies
+loguru
+python-dotenv
+
+# Qdrant vector database
+qdrant-client
+
+# Configuration management
+pydantic-settings
+
+# Embedding & ML
+sentence-transformers
+torch
+transformers
+
+# FastAPI web framework
+fastapi
+uvicorn[standard]
+pydantic
+
+# HTTP client
+httpx
+
+# Utilities
+tqdm
+numpy
+rich
+
+# Elasticsearch (pin to 8.x to match server 8.15.0 in Docker)
+elasticsearch>=8.0.0,<9.0.0
+
+# Redis cache (optional)
+redis
