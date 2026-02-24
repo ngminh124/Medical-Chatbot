@@ -120,7 +120,7 @@ class HierarchyState:
     def get_context(self) -> str:
         """
         Tạo context string cho chunk.
-        Format: [BỆNH: {h1} | MỤC: {h2} > {h3} > {h4} > ...]
+        Format: [{h1} | {h2} > {h3} > {h4} > ...]
         
         Hiển thị TẤT CẢ các cấp có giá trị, không bỏ qua cấp nào.
         VD: Nếu có h1, không có h2, có h3 → hiển thị: h1 > h3
@@ -128,7 +128,7 @@ class HierarchyState:
         if not self.h1:
             return ""
         
-        parts = [f"BỆNH: {self.h1}"]
+        parts = [self.h1]
         
         # Thu thập tất cả các heading có giá trị (từ h2 trở đi)
         muc_parts = []
@@ -144,7 +144,7 @@ class HierarchyState:
             muc_parts.append(self.h6)
         
         if muc_parts:
-            parts.append(f"MỤC: {' > '.join(muc_parts)}")
+            parts.append(' > '.join(muc_parts))
         
         return f"[{' | '.join(parts)}]"
     
@@ -1419,18 +1419,14 @@ class MedicalMarkdownConverter:
         if hierarchy_state and hierarchy_state.disease_name:
             context = hierarchy_state.get_context()
             
-            # Thêm mã ATC nếu có (cho thuốc)
+            # Thêm mã ATC nếu có (cho thuốc) - chỉ thêm mã, không thêm nhãn
             if atc_code and is_drug:
-                # Chèn MÃ ATC vào đầu
-                context = context.replace('[', f'[MÃ ATC: {atc_code} | ')
-            elif is_drug:
-                # Thay BỆNH thành THUỐC
-                context = context.replace('BỆNH:', 'THUỐC:')
+                # Chèn mã ATC vào đầu
+                context = context.replace('[', f'[{atc_code} | ')
             
             return context
         
         # Fallback: Logic cũ nếu không có hierarchy_state
-        subject_type = "THUỐC" if is_drug else "BỆNH"
         
         # Xác định tên subject
         if subject_name:
@@ -1443,14 +1439,14 @@ class MedicalMarkdownConverter:
         # Xây dựng hierarchy từ headers
         parts = []
         
-        # Ưu tiên mã ATC lên đầu nếu có
+        # Ưu tiên mã ATC lên đầu nếu có (giữ lại nhưng không có nhãn)
         if atc_code:
-            parts.append(f"MÃ ATC: {atc_code}")
+            parts.append(atc_code)
         
-        # Thêm loại và tên
-        parts.append(f"{subject_type}: {name}")
+        # Thêm tên (không có nhãn BỆNH: hay THUỐC:)
+        parts.append(name)
         
-        # Thêm MỤC với hierarchy đầy đủ
+        # Thêm hierarchy đầy đủ (không có nhãn MỤC:)
         if headers and len(headers) > 0:
             fixed_headers = [self._fix_protocol_name(h) for h in headers]
             # Bỏ tên bệnh/thuốc (header đầu tiên) nếu trùng với name
@@ -1459,7 +1455,7 @@ class MedicalMarkdownConverter:
             
             if fixed_headers:
                 muc_hierarchy = ' > '.join(fixed_headers)
-                parts.append(f"MỤC: {muc_hierarchy}")
+                parts.append(muc_hierarchy)
         
         prefix = " | ".join(parts)
         return f"[{prefix}]"
@@ -2280,7 +2276,7 @@ def main():
     # Cấu hình đường dẫn
     INPUT_DIR = "/home/nguyenminh/Projects/Vietnamese-Medical-Chatbot/rehierarchy_output"
     OUTPUT_DIR = "/home/nguyenminh/Projects/Vietnamese-Medical-Chatbot/data/chunks"
-    OUTPUT_FILE = "medical_master_data5.jsonl"
+    OUTPUT_FILE = "medical_master_data6.jsonl"
     
     print("=" * 80)
     print("🏥 MEDICAL MARKDOWN TO JSONL CONVERTER v3.0")
