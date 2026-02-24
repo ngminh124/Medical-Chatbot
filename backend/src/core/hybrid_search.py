@@ -7,6 +7,7 @@ from typing import List, Dict, Optional
 from loguru import logger
 
 from ..configs.setup import get_backend_settings
+from ..services.elastic_search import get_elasticsearch_client
 from ..services.embedding import get_embedding_service
 from .vectorize import search_vectors_for_hybrid
 
@@ -146,9 +147,7 @@ def _bm25_search(
     source_filter: Optional[str] = None,
 ) -> List[Dict]:
     """
-    BM25 search using Elasticsearch (placeholder implementation).
-    
-    TODO: Implement with elasticsearch service when available.
+    BM25 search using Elasticsearch.
     
     Args:
         query: Search query
@@ -159,10 +158,18 @@ def _bm25_search(
     Returns:
         List of BM25 search results
     """
-    # Placeholder - returns empty list until Elasticsearch is configured
-    # When implementing, use elasticsearch.py service
-    logger.debug("BM25 search not yet implemented - skipping")
-    return []
+    try:
+        es_client = get_elasticsearch_client()
+        results = es_client.search_bm25(
+            query=query,
+            top_k=top_k,
+            doc_type_filter=doc_type_filter,
+            source_filter=source_filter,
+        )
+        return results
+    except Exception as e:
+        logger.warning(f"BM25 search unavailable (Elasticsearch may not be running): {e}")
+        return []
 
 
 def vector_only_search(
