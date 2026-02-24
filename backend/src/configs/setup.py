@@ -67,6 +67,18 @@ class BackendSettings(BaseSettings):
         default="cuda", description="Device to use for model inference (cuda/cpu/mps)"
     )
 
+    # Elasticsearch Configuration
+    elasticsearch_host: str = Field(
+        default="localhost", description="Elasticsearch server host"
+    )
+    elasticsearch_port: int = Field(
+        default=9200, description="Elasticsearch server port"
+    )
+    elasticsearch_index: str = Field(
+        default="medical_documents",
+        description="Default Elasticsearch index name",
+    )
+
     # Redis Cache Configuration
     redis_host: str = Field(default="localhost", description="Redis server host")
     redis_port: int = Field(default=6379, description="Redis server port")
