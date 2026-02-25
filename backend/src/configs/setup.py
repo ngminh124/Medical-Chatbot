@@ -18,6 +18,14 @@ class BackendSettings(BaseSettings):
         extra="ignore",
     )
 
+    # Application Metadata
+    app_name: str = Field(default="Medical RAG Chatbot", description="Application name")
+    app_version: str = Field(default="1.0.0", description="Application version")
+
+    # OpenTelemetry / Tempo
+    tempo_enabled: bool = Field(default=False, description="Enable OpenTelemetry tracing to Tempo")
+    tempo_endpoint: str = Field(default="http://localhost:4317", description="Tempo OTLP endpoint")
+
     # Qdrant Configuration
     qdrant_host: str = Field(default="localhost", description="Qdrant server host")
     qdrant_port: int = Field(default=6333, description="Qdrant server port")
@@ -84,6 +92,42 @@ class BackendSettings(BaseSettings):
     redis_port: int = Field(default=6379, description="Redis server port")
     redis_db: int = Field(default=0, description="Redis database number")
 
+    # JWT Configuration
+    jwt_secret_key: str = Field(
+        default="change-me-in-production-please",
+        description="Secret key for JWT token signing",
+    )
+
+    # API Keys
+    openai_api_key: str = Field(
+        default="", description="OpenAI API key for Tavily agent"
+    )
+    tavily_api_key: str = Field(
+        default="", description="Tavily API key for web search"
+    )
+
+    # Prompt Templates
+    rewrite_prompt: str = Field(
+        default=(
+            "Dựa vào lịch sử hội thoại sau:\n{history_messages}\n\n"
+            "Hãy viết lại câu hỏi sau sao cho rõ ràng, đầy đủ ngữ cảnh và dễ hiểu hơn, "
+            "giữ nguyên ý nghĩa gốc. Chỉ trả về câu hỏi đã được viết lại, không giải thích.\n\n"
+            "Câu hỏi gốc: {message}\n\nCâu hỏi đã viết lại:"
+        ),
+        description="Prompt template for query rewriting with conversation context",
+    )
+    intent_detection_prompt: str = Field(
+        default=(
+            "Dựa vào lịch sử hội thoại:\n{history}\n\n"
+            "Và câu hỏi hiện tại: {message}\n\n"
+            "Hãy phân loại câu hỏi này thuộc loại nào. Chỉ trả về MỘT trong hai từ sau:\n"
+            "- 'medical' nếu câu hỏi liên quan đến y tế, sức khỏe, bệnh, thuốc, triệu chứng, điều trị\n"
+            "- 'general' nếu câu hỏi là hội thoại thông thường, chào hỏi, hoặc không liên quan y tế\n\n"
+            "Phân loại:"
+        ),
+        description="Prompt template for intent detection (medical vs general)",
+    )
+
     @property
     def data_path(self) -> Path:
         """Get absolute path to data directory."""
@@ -102,3 +146,40 @@ def get_backend_settings() -> BackendSettings:
     Uses lru_cache to ensure settings are loaded only once.
     """
     return BackendSettings()
+
+
+class DatabaseSettings(BaseSettings):
+    """
+    PostgreSQL database configuration.
+    Reads from the same .env file (or environment variables).
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    postgres_user: str = Field(default="postgresadmin", description="PostgreSQL user")
+    postgres_password: str = Field(default="postgresadmin", description="PostgreSQL password")
+    postgres_host: str = Field(default="localhost", description="PostgreSQL host")
+    postgres_port: int = Field(default=5432, description="PostgreSQL port")
+    postgres_db: str = Field(default="medical_rag_db", description="PostgreSQL database name")
+
+    @property
+    def database_url(self) -> str:
+        """Build SQLAlchemy connection URL."""
+        return (
+            f"postgresql://{self.postgres_user}:{self.postgres_password}"
+            f"@{self.postgres_host}:{self.postgres_port}/{self.postgres_db}"
+        )
+
+
+@lru_cache()
+def get_database_settings() -> DatabaseSettings:
+    """
+    Get cached database settings instance.
+    Uses lru_cache to ensure settings are loaded only once.
+    """
+    return DatabaseSettings()
