@@ -1,3 +1,13 @@
-from .setup import BackendSettings, get_backend_settings
+from .setup import (
+    BackendSettings,
+    DatabaseSettings,
+    get_backend_settings,
+    get_database_settings,
+)
 
-__all__ = ["BackendSettings", "get_backend_settings"]
+__all__ = [
+    "BackendSettings",
+    "DatabaseSettings",
+    "get_backend_settings",
+    "get_database_settings",
+]
