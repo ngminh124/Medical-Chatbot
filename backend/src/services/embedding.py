@@ -10,13 +10,44 @@ Key Features:
 - Normalization: Always L2-normalize embeddings
 - Local HTTP: Communicates with serving/qwen3_models/app.py via HTTP
 - Caching: Optional query/embedding caching via Redis
+- Local fallback: Uses SentenceTransformer in-process if HTTP service is down
 """
-from typing import List, Optional
+import threading
+from typing import Any, List, Optional
 
 import httpx
+import numpy as np
 from loguru import logger
 
 from ..configs.setup import get_backend_settings
+
+# ── Local in-process fallback (lazy-loaded) ──────────────────────────────────
+_local_model: Optional[Any] = None
+_local_model_lock = threading.Lock()
+_local_model_failed = False  # avoid repeated load attempts if it fails once
+
+
+def _get_local_embed_model() -> Optional[Any]:
+    """Lazy-load Qwen3-Embedding-0.6B via SentenceTransformer (in-process fallback)."""
+    global _local_model, _local_model_failed
+    if _local_model_failed:
+        return None
+    if _local_model is not None:
+        return _local_model
+    with _local_model_lock:
+        if _local_model is None and not _local_model_failed:
+            try:
+                from sentence_transformers import SentenceTransformer
+
+                logger.info("[EMBED-LOCAL] Loading Qwen3-Embedding-0.6B in-process (fallback)…")
+                _local_model = SentenceTransformer(
+                    "Qwen/Qwen3-Embedding-0.6B",
+                )
+                logger.success("[EMBED-LOCAL] Local embedding model ready")
+            except Exception as exc:
+                logger.error(f"[EMBED-LOCAL] Failed to load local model: {exc}")
+                _local_model_failed = True
+    return _local_model
 
 settings = get_backend_settings()
 
@@ -155,22 +186,15 @@ class Qwen3EmbeddingService:
     ) -> Optional[List[List[float]]]:
         """
         Call local HTTP embedding service for inference.
-
-        Args:
-            texts: List of texts to embed
-            is_query: Whether these are queries (for instruction handling)
-            instruction: Optional instruction prefix for queries
-
-        Returns:
-            List of embedding vectors or None on error
+        Falls back to in-process SentenceTransformer if the HTTP service is down.
         """
+        # ── Primary path: HTTP service ────────────────────────────────────────
         try:
             payload = {
                 "texts": texts,
                 "normalize": True,
                 "is_query": is_query,
             }
-
             if is_query and instruction:
                 payload["instruction"] = instruction
 
@@ -184,11 +208,31 @@ class Qwen3EmbeddingService:
                 return result.get("embeddings")
             else:
                 logger.error(
-                    f"[EMBED] Failed: {response.status_code} - {response.text}"
+                    f"[EMBED] HTTP service error: {response.status_code} - {response.text}"
                 )
-                return None
         except Exception as e:
-            logger.error(f"[EMBED] Error: {e}")
+            logger.warning(f"[EMBED] HTTP service unavailable ({e}), trying local fallback…")
+
+        # ── Fallback path: in-process SentenceTransformer ─────────────────────
+        model = _get_local_embed_model()
+        if model is None:
+            logger.error("[EMBED] Local fallback model also unavailable. Returning None.")
+            return None
+
+        try:
+            encode_texts = texts
+            if is_query and instruction:
+                encode_texts = [f"{instruction}: {t}" for t in texts]
+
+            vecs = model.encode(
+                encode_texts,
+                batch_size=32,
+                convert_to_numpy=True,
+                normalize_embeddings=True,
+            )
+            return vecs.tolist()
+        except Exception as exc:
+            logger.error(f"[EMBED] Local fallback encode failed: {exc}")
             return None
 
     def get_embedding_dimension(self) -> int:
