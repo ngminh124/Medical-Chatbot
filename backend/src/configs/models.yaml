@@ -12,11 +12,12 @@
 #     POST /v1/models/embed   → Qwen3-Embedding-0.6B
 #     POST /v1/models/rerank  → Qwen3-Reranker-0.6B  (FP16)
 #     POST /v1/models/guard   → Qwen3Guard-Gen-0.6B  (FP16)
-#   LLM generation is served separately via vLLM on port 8000.
+#   LLM generation is served separately via vLLM on port 7861.
+#   FastAPI backend runs on port 8000.
 # ============================================================
 
 models:
-  # ── Text Generation (served via vLLM on port 8000) ─────────
+  # ── Text Generation (served via vLLM on port 7861) ─────────
   generation:
     active: "Qwen/Qwen3-4B"
     description: "Main LLM for answer generation, served by vLLM"
@@ -42,6 +43,6 @@ models:
 
 # ── Serving endpoints ───────────────────────────────────────
 serving:
-  vllm_url: "http://localhost:8000/v1"
+  vllm_url: "http://localhost:7861"
   vllm_api_key: ""
   embedding_url: "http://localhost:7860"
