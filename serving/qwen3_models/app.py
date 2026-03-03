@@ -144,24 +144,37 @@ except Exception as e:
     logger.warning(f"⚠️  Reranker not available (non-critical): {e}")
 
 
-# ── 3. Guard (Qwen3Guard-Gen-0.6B, FP16) ─────────────────────────────
+# ── 3. Guard (Qwen3Guard-Gen-0.6B) ───────────────────────────────────
+# Try GPU first; fall back to CPU to avoid OOM when embed+reranker already
+# occupy most VRAM on smaller cards (e.g. RTX 3060 Laptop 6 GB).
 guard_model = None
 guard_tokenizer = None
+GUARD_DEVICE = DEVICE  # may be overridden to "cpu" below
 
-try:
+def _load_guard(device: str):
+    global guard_model, guard_tokenizer, GUARD_DEVICE
     guard_tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL_NAME)
     guard_model = AutoModelForCausalLM.from_pretrained(
         GUARD_MODEL_NAME,
         trust_remote_code=True,
-        torch_dtype=torch.float16,
-    ).to(DEVICE)
+        torch_dtype=torch.float16 if device != "cpu" else torch.float32,
+        low_cpu_mem_usage=True,
+    ).to(device)
     guard_model.eval()
+    GUARD_DEVICE = device
 
-    logger.success(
-        f"✅ Guard loaded: {GUARD_MODEL_NAME} (FP16, 3-tier severity)"
-    )
-except Exception as e:
-    logger.warning(f"⚠️  Guard not available (non-critical): {e}")
+try:
+    _load_guard(DEVICE)
+    logger.success(f"✅ Guard loaded: {GUARD_MODEL_NAME} ({GUARD_DEVICE.upper()})")
+except Exception as e_gpu:
+    logger.warning(f"⚠️  Guard GPU load failed ({e_gpu}); retrying on CPU…")
+    try:
+        _load_guard("cpu")
+        logger.success(f"✅ Guard loaded: {GUARD_MODEL_NAME} (CPU fallback)")
+    except Exception as e_cpu:
+        guard_model = None
+        guard_tokenizer = None
+        logger.warning(f"⚠️  Guard not available (non-critical): {e_cpu}")
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -376,7 +389,7 @@ def guard(req: GuardRequest):
             padding=True,
             truncation=True,
             max_length=512,
-        ).to(DEVICE)
+        ).to(GUARD_DEVICE)
 
         # Generate (deterministic — do_sample=False) ───────────────────
         with torch.no_grad():
