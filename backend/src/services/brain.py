@@ -173,7 +173,7 @@ def ollama_chat_complete(
                     "num_predict": max_tokens,
                 },
             },
-            timeout=120.0,
+            timeout=300.0,
         )
         response.raise_for_status()
         body = response.json()
