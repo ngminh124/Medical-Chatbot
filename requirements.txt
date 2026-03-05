@@ -21,6 +21,10 @@ pydantic
 # HTTP client
 httpx
 
+# OpenAI & Web Search
+openai
+tavily-python
+
 # Utilities
 tqdm
 numpy
@@ -28,6 +32,15 @@ rich
 
 # Elasticsearch (pin to 8.x to match server 8.15.0 in Docker)
 elasticsearch>=8.0.0,<9.0.0
+
+# PostgreSQL ORM
+sqlalchemy
+psycopg2-binary
+
+# Authentication
+bcrypt
+python-jose[cryptography]
+pydantic[email]
 
 # Redis cache (optional)
 redis
