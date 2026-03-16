@@ -92,6 +92,17 @@ class BackendSettings(BaseSettings):
     redis_port: int = Field(default=6379, description="Redis server port")
     redis_db: int = Field(default=0, description="Redis database number")
 
+    # Internal HTTP client resilience (embedding/rerank/guard)
+    service_http_timeout: float = Field(
+        default=20.0, description="HTTP timeout (seconds) for internal model services"
+    )
+    service_http_retries: int = Field(
+        default=2, description="Retry attempts for transient internal HTTP failures"
+    )
+    service_http_backoff_seconds: float = Field(
+        default=0.4, description="Exponential backoff base (seconds) for retries"
+    )
+
     # JWT Configuration
     jwt_secret_key: str = Field(
         default="change-me-in-production-please",
