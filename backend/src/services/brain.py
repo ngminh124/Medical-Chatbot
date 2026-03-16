@@ -152,6 +152,12 @@ def ollama_chat_complete(
     URL is read from ``OLLAMA_URL`` (default ``http://localhost:11434``).
     """
     ollama_url = os.getenv("OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+    ollama_think = os.getenv("OLLAMA_THINK", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     if model is None:
         model = _resolve_ollama_model(ollama_url)
 
@@ -168,6 +174,7 @@ def ollama_chat_complete(
                 "model": model,
                 "messages": messages,
                 "stream": False,
+                "think": ollama_think,
                 "options": {
                     "temperature": temperature,
                     "num_predict": max_tokens,
