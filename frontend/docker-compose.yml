@@ -1,0 +1,20 @@
+services:
+  # --- React Frontend ---
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: medical_frontend
+    ports:
+      - "3000:80"
+    environment:
+      - VITE_API_URL=http://localhost:8000
+      - VITE_TTS_VOICE_ID=
+      - VITE_STT_AUTO_SEND=false
+      - VITE_STT_MAX_RECORDING_MS=20000
+    restart: always
+
+networks:
+  default:
+    name: medical_rag_network
+    external: true
