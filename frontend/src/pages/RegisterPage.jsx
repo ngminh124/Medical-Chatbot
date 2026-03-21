@@ -65,7 +65,7 @@ export default function RegisterPage() {
           <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-primary-600 shadow-lg shadow-primary-200">
             <Heart className="h-8 w-8 text-white" />
           </div>
-          <h1 className="text-2xl font-bold text-gray-900">Medical Chatbot</h1>
+          <h1 className="text-2xl font-bold text-gray-900">Minqes</h1>
           <p className="mt-1 text-sm text-gray-500">Tạo tài khoản mới</p>
         </div>
 
