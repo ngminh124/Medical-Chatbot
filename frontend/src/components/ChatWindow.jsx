@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chatAPI } from "../api/chat";
 import Message, { MessageSkeleton, TypingIndicator } from "./Message";
-import { useSpeechRecognition } from "../hooks/useSpeechRecognition";
-import { useTextToSpeech } from "../hooks/useTextToSpeech";
 import {
+  ChevronDown,
   AlertCircle,
   BookOpen,
   Heart,
-  Loader2,
-  MicOff,
+  Mic,
   Send,
   ShieldCheck,
-  Square,
   Stethoscope,
-  Volume2,
-  VolumeX,
   X,
 } from "lucide-react";
 
@@ -22,44 +17,13 @@ import {
 function ErrorBanner({ message, onDismiss }) {
   if (!message) return null;
   return (
-    <div className="mx-4 mb-2 flex items-start gap-2 rounded-lg border border-red-200 dark:border-red-800 bg-red-50 dark:bg-red-900/20 px-4 py-3 text-sm text-red-700 dark:text-red-400">
-      <AlertCircle className="mt-0.5 h-4 w-4 flex-shrink-0" />
+    <div className="mx-4 mb-3 flex items-start gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-900/20 dark:text-red-400">
+      <AlertCircle className="mt-0.5 h-6 w-6 flex-shrink-0" />
       <span className="flex-1">{message}</span>
-      <button onClick={onDismiss} className="flex-shrink-0 hover:opacity-70">
-        <X className="h-4 w-4" />
+      <button onClick={onDismiss} className="flex h-8 w-8 flex-shrink-0 items-center justify-center hover:opacity-70">
+        <X className="h-6 w-6" />
       </button>
     </div>
-  );
-}
-
-function IconToggleButton({
-  active,
-  disabled,
-  onClick,
-  title,
-  icon: Icon,
-  activeIcon: ActiveIcon,
-  loading,
-}) {
-  return (
-    <button
-      onClick={onClick}
-      disabled={disabled}
-      title={title}
-      className={`mb-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border transition-all ${
-        active
-          ? "border-primary-400 bg-primary-100 text-primary-700 dark:border-primary-500 dark:bg-primary-900/40 dark:text-primary-300"
-          : "border-gray-200 bg-white text-gray-500 hover:border-primary-300 hover:text-primary-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-primary-600 dark:hover:text-primary-400"
-      } disabled:cursor-not-allowed disabled:opacity-50`}
-    >
-      {loading ? (
-        <Loader2 className="h-4 w-4 animate-spin" />
-      ) : active && ActiveIcon ? (
-        <ActiveIcon className="h-4 w-4" />
-      ) : (
-        <Icon className="h-4 w-4" />
-      )}
-    </button>
   );
 }
 
@@ -67,12 +31,12 @@ function ListeningIndicator({ visible, label }) {
   if (!visible) return null;
 
   return (
-    <div className="mt-2 flex items-center gap-2 text-xs text-primary-600 dark:text-primary-400">
+    <div className="mt-2 flex items-center gap-2 text-sm text-primary-600 dark:text-primary-400">
       <div className="flex items-end gap-0.5">
         {[0, 1, 2, 3].map((bar) => (
           <span
             key={bar}
-            className="h-1.5 w-1 animate-pulse rounded-full bg-primary-500"
+            className="h-2.5 w-1 animate-pulse rounded-full bg-primary-500"
             style={{ animationDelay: `${bar * 120}ms` }}
           />
         ))}
@@ -83,7 +47,7 @@ function ListeningIndicator({ visible, label }) {
 }
 
 /* ── Input area ───────────────────────────────────────────── */
-function InputArea({ value, onChange, onSend, disabled, speech, tts, onToggleSpeech, onToggleTts }) {
+function InputArea({ value, onChange, onSend, disabled, isDictating, onToggleDictation, speechSupported }) {
   const textareaRef = useRef(null);
 
   // Auto-resize textarea
@@ -103,9 +67,9 @@ function InputArea({ value, onChange, onSend, disabled, speech, tts, onToggleSpe
   };
 
   return (
-    <div className="border-t border-gray-100 dark:border-gray-800 bg-white dark:bg-gray-900 p-4">
+    <div className="border-t border-gray-100 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
       <div className="mx-auto max-w-3xl">
-        <div className="flex items-end gap-2 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-2 shadow-sm transition-colors focus-within:border-primary-300 dark:focus-within:border-primary-600 focus-within:shadow-md">
+        <div className="flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm transition-colors focus-within:border-primary-300 focus-within:shadow-md dark:border-gray-700 dark:bg-gray-800 dark:focus-within:border-primary-600">
           <textarea
             ref={textareaRef}
             value={value}
@@ -114,37 +78,33 @@ function InputArea({ value, onChange, onSend, disabled, speech, tts, onToggleSpe
             placeholder="Nhập câu hỏi của bạn... (Enter để gửi, Shift+Enter xuống dòng)"
             rows={1}
             disabled={disabled}
-            className="max-h-40 flex-1 resize-none bg-transparent py-1.5 text-sm text-gray-800 dark:text-gray-200 placeholder-gray-400 dark:placeholder-gray-500 outline-none disabled:opacity-60"
+            className="max-h-48 flex-1 resize-none bg-transparent py-2 text-base text-gray-800 placeholder-gray-400 outline-none disabled:opacity-60 dark:text-gray-200 dark:placeholder-gray-500"
           />
-          <IconToggleButton
-            active={speech.isRecording}
-            loading={speech.isTranscribing}
-            icon={MicOff}
-            activeIcon={Square}
-            title={speech.isRecording ? "Dừng ghi âm" : "Nhập bằng giọng nói"}
-            onClick={onToggleSpeech}
-            disabled={disabled || speech.isTranscribing}
-          />
-          <IconToggleButton
-            active={tts.enabled || tts.isPlaying}
-            loading={tts.isLoading}
-            icon={VolumeX}
-            activeIcon={tts.isPlaying ? Square : Volume2}
-            title={tts.isPlaying ? "Dừng phát âm" : "Bật/tắt đọc phản hồi"}
-            onClick={onToggleTts}
-            disabled={disabled || speech.isTranscribing}
-          />
-          <button
-            onClick={onSend}
-            disabled={!value.trim() || disabled}
-            className="mb-1 flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg bg-primary-600 text-white transition-all hover:bg-primary-700 disabled:opacity-40 disabled:cursor-not-allowed"
-            title="Gửi (Enter)"
-          >
-            <Send className="h-4 w-4" />
-          </button>
+          <div className="mb-1 flex items-center gap-2">
+            <button
+              onClick={onToggleDictation}
+              disabled={disabled || !speechSupported}
+              title={speechSupported ? (isDictating ? "Dừng nhập giọng nói" : "Nhập bằng giọng nói") : "Trình duyệt chưa hỗ trợ nhập giọng nói"}
+              className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl border transition-all ${
+                isDictating
+                  ? "animate-pulse border-red-400 bg-red-100 text-red-600 dark:border-red-500 dark:bg-red-900/30 dark:text-red-300"
+                  : "border-gray-200 bg-white text-gray-600 hover:border-primary-300 hover:text-primary-600 dark:border-gray-700 dark:bg-gray-800 dark:text-gray-400 dark:hover:border-primary-600 dark:hover:text-primary-400"
+              } disabled:cursor-not-allowed disabled:opacity-50`}
+            >
+              <Mic className="h-6 w-6" />
+            </button>
+            <button
+              onClick={onSend}
+              disabled={!value.trim() || disabled}
+              className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-primary-600 text-white transition-all hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-40"
+              title="Gửi (Enter)"
+            >
+              <Send className="h-6 w-6" />
+            </button>
+          </div>
         </div>
-        <ListeningIndicator visible={speech.isRecording || speech.isTranscribing} label={speech.statusLabel} />
-        <p className="mt-1.5 text-center text-xs text-gray-400 dark:text-gray-600">
+        <ListeningIndicator visible={isDictating} label="Đang nghe..." />
+        <p className="mt-2 text-center text-sm text-gray-400 dark:text-gray-600">
           Minqes cung cấp thông tin y khoa tham khảo. Luôn tham vấn bác sĩ cho các tình huống nghiêm trọng.
         </p>
       </div>
@@ -159,16 +119,13 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const [sending, setSending]             = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError]                 = useState(null);
+  const [isDictating, setIsDictating]     = useState(false);
+  const [speechSupported, setSpeechSupported] = useState(true);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const messageListRef = useRef(null);
   const messagesEndRef = useRef(null);
-  const lastSpokenAssistantIdRef = useRef(null);
-
-  const AUTO_SEND_STT = String(import.meta.env.VITE_STT_AUTO_SEND || "false").toLowerCase() === "true";
-
-  const handleSpeechError = useCallback((message) => {
-    setError(message || "Đã xảy ra lỗi xử lý giọng nói. Vui lòng thử lại.");
-  }, []);
-
-  const tts = useTextToSpeech({ onError: handleSpeechError });
+  const speechRecognitionRef = useRef(null);
+  const dictationBaseTextRef = useRef("");
 
   const handleSend = useCallback(async (contentOverride) => {
     const content = (contentOverride ?? input).trim();
@@ -231,51 +188,75 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
     }
   }, [input, sending, threadId, onThreadCreated]);
 
-  const speech = useSpeechRecognition({
-    onTranscript: (text) => {
-      setInput(text);
-      if (AUTO_SEND_STT) {
-        handleSend(text);
-      }
-    },
-    onError: handleSpeechError,
-  });
-
-  const handleToggleSpeech = useCallback(async () => {
-    if (!speech.isRecording && !speech.isTranscribing) {
-      const prompted = sessionStorage.getItem("stt_prompted_this_session") === "1";
-      if (!prompted) {
-        const accepted = window.confirm(
-          "Cho phép website truy cập microphone để nhập liệu bằng giọng nói?"
-        );
-        sessionStorage.setItem("stt_prompted_this_session", "1");
-        if (!accepted) return;
-
-        const granted = await speech.requestPermission();
-        if (!granted) return;
-      }
-    }
-
-    speech.toggleRecording();
-  }, [speech]);
-
-  const handleToggleTts = useCallback(() => {
-    if (tts.isPlaying) {
-      tts.stop();
+  const handleToggleDictation = useCallback(() => {
+    const recognition = speechRecognitionRef.current;
+    if (!recognition) {
+      setError("Trình duyệt chưa hỗ trợ nhập liệu bằng giọng nói.");
       return;
     }
 
-    const prompted = sessionStorage.getItem("tts_prompted_this_session") === "1";
-    if (!prompted) {
-      const accepted = window.confirm(
-        "Cho phép website đọc phản hồi bằng giọng nói (TTS)?"
-      );
-      sessionStorage.setItem("tts_prompted_this_session", "1");
-      if (!accepted) return;
+    setError(null);
+    if (isDictating) {
+      recognition.stop();
+      return;
     }
 
-    tts.toggleEnabled();
-  }, [tts]);
+    dictationBaseTextRef.current = input?.trim() || "";
+    recognition.start();
+  }, [input, isDictating]);
+
+  useEffect(() => {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+      setSpeechSupported(false);
+      return;
+    }
+
+    const recognition = new SpeechRecognition();
+    recognition.lang = "vi-VN";
+    recognition.interimResults = true;
+    recognition.continuous = false;
+
+    recognition.onstart = () => setIsDictating(true);
+    recognition.onend = () => setIsDictating(false);
+    recognition.onerror = (event) => {
+      setIsDictating(false);
+      if (event?.error === "not-allowed") {
+        setError("Bạn chưa cấp quyền microphone. Vui lòng cho phép truy cập micro để dùng nhập giọng nói.");
+      } else {
+        setError("Không thể nhận diện giọng nói. Vui lòng thử lại.");
+      }
+    };
+
+    recognition.onresult = (event) => {
+      let finalTranscript = "";
+      let interimTranscript = "";
+
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const transcript = event.results[i]?.[0]?.transcript || "";
+        if (event.results[i].isFinal) {
+          finalTranscript += transcript;
+        } else {
+          interimTranscript += transcript;
+        }
+      }
+
+      const spokenText = `${finalTranscript} ${interimTranscript}`.trim();
+      const base = dictationBaseTextRef.current;
+      setInput([base, spokenText].filter(Boolean).join(" ").trim());
+    };
+
+    speechRecognitionRef.current = recognition;
+
+    return () => {
+      recognition.onstart = null;
+      recognition.onend = null;
+      recognition.onerror = null;
+      recognition.onresult = null;
+      recognition.stop();
+      speechRecognitionRef.current = null;
+    };
+  }, []);
 
   /* Load message history when thread changes */
   useEffect(() => {
@@ -292,16 +273,24 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   /* Auto-scroll */
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    setShowScrollToBottom(false);
   }, [messages, sending]);
 
-  useEffect(() => {
-    const latestAssistant = [...messages].reverse().find((msg) => msg.role === "assistant");
-    if (!latestAssistant || !tts.enabled || sending) return;
-    if (lastSpokenAssistantIdRef.current === latestAssistant.id) return;
+  const updateScrollButtonVisibility = useCallback(() => {
+    const el = messageListRef.current;
+    if (!el) return;
 
-    lastSpokenAssistantIdRef.current = latestAssistant.id;
-    tts.speak(latestAssistant.content);
-  }, [messages, sending, tts]);
+    const distanceFromBottom = el.scrollHeight - (el.scrollTop + el.clientHeight);
+    setShowScrollToBottom(distanceFromBottom > 300);
+  }, []);
+
+  const handleScrollToBottom = useCallback(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, []);
+
+  useEffect(() => {
+    updateScrollButtonVisibility();
+  }, [messages, updateScrollButtonVisibility]);
 
   /* Regenerate last assistant message */
   const handleRegenerate = useCallback(async (assistantMsg) => {
@@ -330,10 +319,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           onChange={() => {}}
           onSend={() => {}}
           disabled
-          speech={speech}
-          tts={tts}
-          onToggleSpeech={handleToggleSpeech}
-          onToggleTts={handleToggleTts}
+          isDictating={isDictating}
+          onToggleDictation={handleToggleDictation}
+          speechSupported={speechSupported}
         />
       </div>
     );
@@ -345,13 +333,13 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       <div className="flex h-full flex-col bg-white dark:bg-gray-900">
         <div className="flex flex-1 flex-col items-center justify-center px-4">
           <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-primary-100 dark:bg-primary-900/30">
-            <Heart className="h-10 w-10 text-primary-600 dark:text-primary-400" />
+            <Heart className="h-12 w-12 text-primary-600 dark:text-primary-400" />
           </div>
           <h2 className="mb-2 text-2xl font-bold text-gray-900 dark:text-gray-100">
             Xin chào! 👋
           </h2>
           <p className="mb-8 max-w-md text-center text-gray-500 dark:text-gray-400">
-            Tôi là Meddy — trợ lý y khoa AI. Hãy hỏi tôi về các vấn đề sức khỏe,
+            Tôi là Minqes — trợ lý y khoa AI. Hãy hỏi tôi về các vấn đề sức khỏe,
             triệu chứng, hoặc thông tin y khoa.
           </p>
 
@@ -366,9 +354,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
               <button
                 key={i}
                 onClick={() => setInput(item.text)}
-                className="flex items-start gap-3 rounded-xl border border-gray-200 dark:border-gray-700 bg-white dark:bg-gray-800 px-4 py-3 text-left text-sm text-gray-600 dark:text-gray-300 transition-all hover:border-primary-200 dark:hover:border-primary-700 hover:bg-primary-50 dark:hover:bg-primary-900/20 hover:shadow-sm"
+                className="flex items-start gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 text-left text-sm text-gray-600 transition-all hover:border-primary-200 hover:bg-primary-50 hover:shadow-sm dark:border-gray-700 dark:bg-gray-800 dark:text-gray-300 dark:hover:border-primary-700 dark:hover:bg-primary-900/20"
               >
-                <item.icon className="mt-0.5 h-4 w-4 flex-shrink-0 text-primary-500" />
+                <item.icon className="mt-0.5 h-6 w-6 flex-shrink-0 text-primary-500" />
                 <span>{item.text}</span>
               </button>
             ))}
@@ -381,10 +369,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           onChange={setInput}
           onSend={handleSend}
           disabled={sending}
-          speech={speech}
-          tts={tts}
-          onToggleSpeech={handleToggleSpeech}
-          onToggleTts={handleToggleTts}
+          isDictating={isDictating}
+          onToggleDictation={handleToggleDictation}
+          speechSupported={speechSupported}
         />
       </div>
     );
@@ -392,9 +379,13 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
 
   /* ── Active chat ─────────────────────────────────────────── */
   return (
-    <div className="flex h-full flex-col bg-white dark:bg-gray-900">
+    <div className="relative flex h-full flex-col bg-white dark:bg-gray-900">
       {/* Message list */}
-      <div className="flex-1 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800">
+      <div
+        ref={messageListRef}
+        onScroll={updateScrollButtonVisibility}
+        className="flex-1 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800"
+      >
         {messages.map((msg) => (
           <Message
             key={msg.id}
@@ -409,16 +400,25 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         <div ref={messagesEndRef} />
       </div>
 
+      {showScrollToBottom && (
+        <button
+          onClick={handleScrollToBottom}
+          className="absolute bottom-28 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-gray-200 bg-white text-primary-600 shadow-lg transition-all hover:-translate-y-0.5 hover:bg-primary-50 dark:border-gray-700 dark:bg-gray-800 dark:text-primary-300 dark:hover:bg-gray-700"
+          title="Cuộn xuống tin nhắn mới nhất"
+        >
+          <ChevronDown className="h-6 w-6" />
+        </button>
+      )}
+
       <ErrorBanner message={error} onDismiss={() => setError(null)} />
       <InputArea
         value={input}
         onChange={setInput}
         onSend={handleSend}
         disabled={sending}
-        speech={speech}
-        tts={tts}
-        onToggleSpeech={handleToggleSpeech}
-        onToggleTts={handleToggleTts}
+        isDictating={isDictating}
+        onToggleDictation={handleToggleDictation}
+        speechSupported={speechSupported}
       />
     </div>
   );
