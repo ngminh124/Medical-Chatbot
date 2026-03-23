@@ -19,7 +19,7 @@ from .src.core import metrics  # noqa: F401
 from .src.core.vectorize import create_collection
 from .models import init_db
 # Import routers
-from .src.routers import audio, documents, health, models, rag
+from .src.routers import audio, documents, health, models, rag, stt, tts
 from .src.routers.auth import router as auth_router
 from .src.routers.chat import router as chat_router
 
@@ -53,7 +53,12 @@ app = FastAPI(title=settings.app_name, version=settings.app_version)
 # CORS — allow frontend to connect
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://127.0.0.1:3000"],
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -181,7 +186,7 @@ def on_startup():
         # Initialize STT service
         try:
             from .src.core.model_config import load_model_config
-            from .src.services.stt_service import initialize_stt_service
+            from .src.services.stt import initialize_stt_service
 
             config = load_model_config()
             stt_config = config.get("models", {}).get("stt", {})
@@ -198,12 +203,10 @@ def on_startup():
                 f"⚠️  Failed to initialize STT service: {e}"
             )  # Initialize TTS service
         try:
-            import os
+            from .src.services.tts import initialize_tts_service
 
-            from .src.services.tts_service import initialize_tts_service
-
-            api_key = os.getenv("ELEVENLABS_API_KEY")
-            voice_id = os.getenv("ELEVENLABS_VOICE_ID")
+            api_key = settings.elevenlabs_api_key
+            voice_id = settings.elevenlabs_voice_id
 
             if api_key:
                 initialize_tts_service(api_key=api_key, voice_id=voice_id)
@@ -223,9 +226,9 @@ def on_startup():
                     "role": "system",
                     # /no_think disables the thinking phase on Qwen3 models so
                     # the warmup response is fast and doesn't need many tokens.
-                    "content": "Bạn là Min - trợ lý y tế thông minh. /no_think",
+                    "content": "Bạn là Minqes - trợ lý y tế thông minh. /no_think",
                 },
-                {"role": "user", "content": "Chào Min!"},
+                {"role": "user", "content": "Chào Minqes!"},
             ]
 
             # 512 tokens gives the model room to finish even if thinking is on.
@@ -259,12 +262,28 @@ def on_startup():
         raise
 
 
+@app.on_event("shutdown")
+async def on_shutdown():
+    """Graceful shutdown for shared async clients."""
+    try:
+        from .src.services.stt import close_stt_service
+        from .src.services.tts import close_tts_service
+
+        await close_stt_service()
+        await close_tts_service()
+        logger.info("✅ STT/TTS clients closed")
+    except Exception as e:
+        logger.warning(f"⚠️  Failed to close STT/TTS clients: {e}")
+
+
 # Include routers
 app.include_router(health.router)
 app.include_router(rag.router)
 app.include_router(models.router)
 app.include_router(audio.router)
 app.include_router(documents.router)
+app.include_router(stt.router)
+app.include_router(tts.router)
 
 # Auth & Chat routers
 app.include_router(auth_router)
@@ -286,6 +305,8 @@ def read_root():
             "/v1/indexing",
             "/v1/documents",
             "/v1/audio",
+            "/v1/stt",
+            "/v1/tts",
         ],
     }
 
