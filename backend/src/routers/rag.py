@@ -1,4 +1,4 @@
-"""RAG pipeline — retrieval-augmented generation for Vietnamese Medical Chatbot."""
+"""RAG pipeline — retrieval-augmented generation for Minqes."""
 
 from typing import Any, Dict, List
 
@@ -17,7 +17,7 @@ router = APIRouter(prefix="/v1/rag", tags=["rag"])
 # ────────────────────────────────────────────────────────────
 
 MEDICAL_SYSTEM_PROMPT = (
-    "Bạn là Minqes — trợ lý y khoa thông minh của hệ thống Medical RAG Chatbot. "
+    "Bạn là Minqes — trợ lý y khoa thông minh của hệ thống Minqes. "
     "Bạn cung cấp thông tin y khoa chính xác, dễ hiểu bằng tiếng Việt dựa trên "
     "tài liệu y khoa được cung cấp.\n\n"
     "Nguyên tắc:\n"
@@ -29,7 +29,7 @@ MEDICAL_SYSTEM_PROMPT = (
 )
 
 GENERAL_SYSTEM_PROMPT = (
-    "Bạn là Minqes — trợ lý thông minh của hệ thống Medical RAG Chatbot. "
+    "Bạn là Minqes — trợ lý thông minh của hệ thống Minqes. "
     "Hãy trả lời thân thiện và hữu ích bằng tiếng Việt. /no_think"
 )
 
