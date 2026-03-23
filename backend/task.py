@@ -257,7 +257,7 @@ def bot_route_answer_message(history, question, system_prompt=None):
                 {
                     "role": "system",
                     "content": system_prompt
-                    or "Bạn là Meddy - Trợ lý y tế thông minh cho người Việt.",
+                    or "Bạn là Minqes - Trợ lý y tế thông minh cho người Việt.",
                 }
             ]
             + history
