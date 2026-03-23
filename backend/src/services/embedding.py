@@ -1,5 +1,5 @@
 """
-Qwen3 Embedding Service for Vietnamese Medical Chatbot
+Qwen3 Embedding Service for Minqes
 
 This service handles embeddings using a local HTTP endpoint that runs:
   Qwen/Qwen3-Embedding-0.6B
