@@ -1,5 +1,6 @@
 """RAG pipeline — retrieval-augmented generation for Minqes."""
 
+import os
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends
@@ -60,6 +61,7 @@ def run_rag_pipeline(
     """
     citations: List[Dict[str, Any]] = []
     route = "medical"
+    web_search_used = False
 
     # ── 1. Guardrails ─────────────────────────────────────────────────────────
     try:
@@ -107,6 +109,7 @@ def run_rag_pipeline(
 
     # ── 4 & 5. Hybrid search + Reranking  (medical route only) ──────────────
     context = ""
+    retrieval_confidence = 0.0
     if route == "medical":
         try:
             from ..core.hybrid_search import hybrid_search
@@ -116,9 +119,56 @@ def run_rag_pipeline(
             if raw_results:
                 results = _rerank(enhanced_query, raw_results, top_k)
                 context, citations = _build_context(results)
+                if results:
+                    retrieval_confidence = float(
+                        results[0].get("relevance_score")
+                        or results[0].get("rrf_score")
+                        or results[0].get("score", 0.0)
+                    )
                 logger.info(f"[RAG] Using {len(citations)} documents as context")
         except Exception as e:
             logger.error(f"[RAG] Search pipeline failed, generating without context: {e}")
+
+    # ── 5.5 Optional Tavily fallback ─────────────────────────────────────────
+    tavily_enabled = bool(settings.tavily_api_key or os.getenv("TAVILY_API_KEY"))
+    use_tavily = False
+    tavily_reason = ""
+
+    # Use Tavily for general route, or when medical retrieval is weak.
+    if tavily_enabled:
+        if route == "general":
+            use_tavily = True
+            tavily_reason = "general_route"
+        elif route == "medical" and (not citations or retrieval_confidence < 0.5):
+            use_tavily = True
+            tavily_reason = (
+                "no_documents" if not citations else f"low_confidence:{retrieval_confidence:.3f}"
+            )
+
+    if use_tavily:
+        try:
+            from ..services.brain import get_tavily_agent_answer
+
+            logger.info(f"[RAG] 🌐 Tavily fallback enabled ({tavily_reason})")
+            messages_for_web = _build_generation_messages(
+                route=route,
+                history=history,
+                question=question,
+                context=context,
+            )
+            web_answer = get_tavily_agent_answer(messages_for_web)
+            if web_answer and not web_answer.startswith("Xin lỗi, đã có lỗi"):
+                web_search_used = True
+                return {
+                    "answer": web_answer,
+                    "citations": citations,
+                    "route": f"{route}_web",
+                    "web_search_used": web_search_used,
+                    "web_search_reason": tavily_reason,
+                }
+            logger.warning("[RAG] Tavily returned empty/error answer, fallback to normal generation")
+        except Exception as e:
+            logger.warning(f"[RAG] Tavily fallback failed, continue with local generation: {e}")
 
     # ── 6. Generation ─────────────────────────────────────────────────────────
     messages = _build_generation_messages(route, history, question, context)
@@ -137,7 +187,13 @@ def run_rag_pipeline(
         )
         citations = []
 
-    return {"answer": answer, "citations": citations, "route": route}
+    return {
+        "answer": answer,
+        "citations": citations,
+        "route": route,
+        "web_search_used": web_search_used,
+        "web_search_reason": tavily_reason,
+    }
 
 
 # ────────────────────────────────────────────────────────────
@@ -255,5 +311,7 @@ def rag_query(
         "metadata": {
             "route": result["route"],
             "retrieval_count": len(result["citations"]),
+            "web_search_used": result.get("web_search_used", False),
+            "web_search_reason": result.get("web_search_reason", ""),
         },
     }
