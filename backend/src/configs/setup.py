@@ -117,6 +117,23 @@ class BackendSettings(BaseSettings):
         default="", description="Tavily API key for web search"
     )
 
+    # TTS / STT configuration
+    elevenlabs_api_key: str = Field(
+        default="", description="ElevenLabs API key"
+    )
+    elevenlabs_voice_id: str = Field(
+        default="A5w1fw5x0uXded1LDvZp", description="Default voice ID"
+    )
+    stt_gpu_service_url: str = Field(
+        default="http://extra_models:8002", description="URL của GPU service cho STT"
+    )
+    stt_cache_ttl: int = Field(
+        default=3600, description="Thời gian cache STT (giây)"
+    )
+    tts_cache_ttl: int = Field(
+        default=86400, description="Thời gian cache TTS (giây)"
+    )
+
     # Prompt Templates
     rewrite_prompt: str = Field(
         default=(
