@@ -39,6 +39,11 @@ def _get_redis_client():
     return _redis_client
 
 
+def get_redis_client():
+    """Public accessor for shared Redis client instance."""
+    return _get_redis_client()
+
+
 def get_query_embedding(cache_key: str) -> Optional[List[float]]:
     """
     Get cached query embedding from Redis.
