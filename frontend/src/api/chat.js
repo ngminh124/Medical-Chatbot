@@ -33,10 +33,15 @@ export const chatAPI = {
    * Returns { user_message, assistant_message, citations, route }.
    * Uses a 300-second timeout to accommodate long LLM generation time.
    */
-  ask: (threadId, content) =>
+  ask: (threadId, content, options = {}) =>
     client.post(
       `/v1/chat/threads/${threadId}/ask`,
-      { content },
+      {
+        content,
+        ...(typeof options.web_search_enabled === "boolean"
+          ? { web_search_enabled: options.web_search_enabled }
+          : {}),
+      },
       { timeout: 300_000 },
     ),
 
