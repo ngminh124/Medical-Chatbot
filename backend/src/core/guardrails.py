@@ -47,6 +47,16 @@ class Qwen3GuardService:
 
     # Severity levels (Qwen3Guard specification)
     SEVERITY_LEVELS = ["Safe", "Controversial", "Unsafe"]
+    HIGH_RISK_SELF_HARM_PATTERNS = [
+        re.compile(
+            r"(tự\s*tử|tu\s*tu|kết\s*liễu|muốn\s*chết|không\s*muốn\s*sống|ngủ\s*vĩnh\s*viễn)",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(thuốc|uống|liều|cách|lam\s*sao|làm\s*sao).{0,40}(chết|tự\s*tử|ngủ\s*vĩnh\s*viễn|ra\s*đi)",
+            re.IGNORECASE,
+        ),
+    ]
 
     def __init__(
         self,
@@ -82,6 +92,18 @@ class Qwen3GuardService:
         if not query or not query.strip():
             return False, "empty_query", {"reason": "Empty query"}
 
+        if self._matches_high_risk_self_harm(query):
+            logger.warning("[GUARD] Heuristic block: high-risk self-harm intent detected")
+            return (
+                False,
+                "Suicide & Self-Harm",
+                {
+                    "severity": "Unsafe",
+                    "categories": ["Suicide & Self-Harm"],
+                    "details": {"source": "heuristic"},
+                },
+            )
+
         try:
             is_safe, severity, categories, refusal, details = self._check_with_local(
                 query, check_type="input"
@@ -112,6 +134,13 @@ class Qwen3GuardService:
         except Exception as e:
             logger.warning(f"[GUARD] Service unavailable, fail-open: {e}")
             return True, None, {"error": str(e), "failover": True}
+
+    def _matches_high_risk_self_harm(self, text: str) -> bool:
+        """Fast heuristic for obvious self-harm requests when model output is ambiguous."""
+        normalized = (text or "").strip()
+        if not normalized:
+            return False
+        return any(pattern.search(normalized) for pattern in self.HIGH_RISK_SELF_HARM_PATTERNS)
 
     def validate_response(
         self, response: str, query: str, max_retries: int = 2
@@ -218,13 +247,14 @@ class Qwen3GuardService:
 
             result = response.json()
             raw_output = result.get("raw_output", "")
-            severity = self._parse_severity(raw_output)
-            categories = self._parse_categories(raw_output)
+            severity = result.get("severity") or self._parse_severity(raw_output)
+            categories = result.get("categories") or self._parse_categories(raw_output)
             refusal = (
-                self._parse_refusal(raw_output) if check_type == "output" else None
+                result.get("refusal")
+                or (self._parse_refusal(raw_output) if check_type == "output" else None)
             )
 
-            is_safe = severity == "Safe"
+            is_safe = result.get("is_safe", severity == "Safe")
             details = {
                 "raw_output": raw_output,
                 "model": self.huggingface_model,
