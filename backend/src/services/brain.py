@@ -395,6 +395,12 @@ def detect_route(history, message):
 
 
 def get_tavily_agent_answer(messages):
+    """Backward-compatible wrapper returning only answer text."""
+    result = get_tavily_agent_answer_with_sources(messages)
+    return result.get("answer")
+
+
+def get_tavily_agent_answer_with_sources(messages):
     """Generate answer using Tavily web search with intelligent context management.
     
     Flow:
@@ -413,7 +419,11 @@ def get_tavily_agent_answer(messages):
                 break
 
         if not user_query:
-            return "Xin lỗi, không tìm thấy câu hỏi để tìm kiếm."
+            return {
+                "answer": "Xin lỗi, không tìm thấy câu hỏi để tìm kiếm.",
+                "citations": [],
+                "query": "",
+            }
 
         # If user_query is a long RAG prompt, try to extract only the original question.
         extracted = None
@@ -430,10 +440,14 @@ def get_tavily_agent_answer(messages):
 
         search_query = truncate_tavily_query(extracted or user_query)
         if not search_query:
-            return "Xin lỗi, không tìm thấy câu hỏi hợp lệ để tìm kiếm."
+            return {
+                "answer": "Xin lỗi, không tìm thấy câu hỏi hợp lệ để tìm kiếm.",
+                "citations": [],
+                "query": "",
+            }
 
         # Search web via Tavily
-        observation = tavily_search(search_query)
+        observation, web_citations = tavily_search(search_query, return_results=True)
 
         # Keep only recent messages to avoid token overflow
         recent_messages = _truncate_messages(messages, max_messages=6)
@@ -460,15 +474,32 @@ def get_tavily_agent_answer(messages):
             },
         ]
 
-        final_response = qwen3_chat_complete(enhanced_messages, max_tokens=1536)
+        # Use unified generation path (vLLM -> Ollama fallback)
+        final_response = get_response(
+            messages=enhanced_messages,
+            temperature=0.7,
+            max_tokens=1536,
+        )
 
         if not final_response:
-            return "Xin lỗi, không thể tạo câu trả lời từ kết quả tìm kiếm."
+            return {
+                "answer": "Xin lỗi, không thể tạo câu trả lời từ kết quả tìm kiếm.",
+                "citations": web_citations,
+                "query": search_query,
+            }
 
-        return final_response
+        return {
+            "answer": final_response,
+            "citations": web_citations,
+            "query": search_query,
+        }
     except Exception as e:
         logger.error(f"[GEN] Tavily agent failed: {e}")
-        return f"Xin lỗi, đã có lỗi xảy ra khi tìm kiếm thông tin: {str(e)}"
+        return {
+            "answer": f"Xin lỗi, đã có lỗi xảy ra khi tìm kiếm thông tin: {str(e)}",
+            "citations": [],
+            "query": "",
+        }
 
 
 def _truncate_messages(messages: list, max_messages: int = 6) -> list:
