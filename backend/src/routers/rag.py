@@ -66,23 +66,29 @@ def run_rag_pipeline(
 
     # ── 1. Guardrails ─────────────────────────────────────────────────────────
     try:
-        from ..core.guardrails import Qwen3GuardService
+        from ..core.guardrails import get_guardrails_service
 
-        guard = Qwen3GuardService()
-        is_valid, violation, _ = guard.validate_query(question)
+        guard = get_guardrails_service()
+        logger.info("[GUARD] Input moderation started")
+        is_valid, violation, metadata = guard.validate_query(question)
+
+        if metadata and metadata.get("failover"):
+            logger.warning(
+                f"[GUARD] Fail-open active: {metadata.get('error', 'unknown_error')}"
+            )
+
         if not is_valid:
-            logger.warning(f"[RAG] Query blocked by guardrails: {violation}")
+            logger.warning(f"[GUARD] Query blocked: category={violation}")
             return {
-                "answer": (
-                    "Xin lỗi, câu hỏi của bạn không thể được xử lý do vi phạm "
-                    f"chính sách nội dung ({violation}). "
-                    "Vui lòng đặt câu hỏi theo cách khác."
-                ),
+                "answer": guard.get_rejection_message(violation or "unknown"),
                 "citations": [],
                 "route": "blocked",
             }
+        logger.info(
+            f"[GUARD] Query passed: severity={(metadata or {}).get('severity', 'unknown')}"
+        )
     except Exception as e:
-        logger.warning(f"[RAG] Guardrails unavailable, continuing without check: {e}")
+        logger.warning(f"[GUARD] Service unavailable, fail-open in pipeline: {e}")
 
     # ── 2. Intent detection ──────────────────────────────────────────────────
     try:
@@ -155,7 +161,7 @@ def run_rag_pipeline(
 
     if use_tavily:
         try:
-            from ..services.brain import get_tavily_agent_answer
+            from ..services.brain import get_tavily_agent_answer_with_sources
 
             logger.info(f"[RAG] 🌐 Tavily fallback enabled ({tavily_reason})")
             messages_for_web = _build_generation_messages(
@@ -164,12 +170,16 @@ def run_rag_pipeline(
                 question=question,
                 context=context,
             )
-            web_answer = get_tavily_agent_answer(messages_for_web)
-            if web_answer and not web_answer.startswith("Xin lỗi, đã có lỗi"):
+            web_result = get_tavily_agent_answer_with_sources(messages_for_web)
+            web_answer = (web_result or {}).get("answer", "")
+            web_citations = (web_result or {}).get("citations", [])
+
+            if web_answer and not web_answer.startswith("Xin lỗi"):
                 web_search_used = True
+                merged_citations = [*citations, *web_citations]
                 return {
                     "answer": web_answer,
-                    "citations": citations,
+                    "citations": merged_citations,
                     "route": f"{route}_web",
                     "web_search_used": web_search_used,
                     "web_search_reason": tavily_reason,
