@@ -1,5 +1,6 @@
 import os
 import re
+from typing import Dict, List, Tuple
 
 from loguru import logger
 from tavily import TavilyClient
@@ -38,18 +39,42 @@ def get_tavily_client():
         raise
 
 
-def tavily_search(query: str):
+def _normalize_tavily_results(results: List[dict], max_results: int = 3) -> List[Dict]:
+    """Normalize Tavily raw results into frontend-friendly citation items."""
+    normalized: List[Dict] = []
+    for doc in (results or [])[:max_results]:
+        normalized.append(
+            {
+                "title": doc.get("title", "Untitled"),
+                "url": doc.get("url", ""),
+                "snippet": doc.get("content", "No content available"),
+                "type": "web",
+                "score": float(doc.get("score", 0.0) or 0.0),
+                # backward compatibility with existing UI fallbacks
+                "content": doc.get("content", "No content available"),
+                "source": doc.get("url", ""),
+            }
+        )
+    return normalized
+
+
+def tavily_search(
+    query: str,
+    max_results: int = 3,
+    return_results: bool = False,
+) -> str | Tuple[str, List[Dict]]:
     try:
         safe_query = truncate_tavily_query(query)
         if not safe_query:
             raise ValueError("Empty Tavily query after normalization")
 
         client = get_tavily_client()
-        output_search = client.search(safe_query).get("results")[:3]
+        raw = client.search(safe_query, max_results=max_results)
+        output_search = _normalize_tavily_results(raw.get("results") or [], max_results)
         search_document = "Here are the retrieved documents from the internet:\n\n"
 
         for i, doc in enumerate(output_search):
-            content = doc.get("content", "No content available")
+            content = doc.get("snippet", "No content available")
             url = doc.get("url", "No URL available")
             title = doc.get("title", "Untitled")
 
@@ -65,6 +90,8 @@ def tavily_search(query: str):
         search_document += "---\n"
         search_document += "IMPORTANT: When using these search results in your response, you MUST cite the sources by including the URLs and mentioning which source number you're referencing.\n"
 
+        if return_results:
+            return search_document, output_search
         return search_document
     except Exception as e:
         logger.error(f"Error searching for external information using Tavily: {e}")
