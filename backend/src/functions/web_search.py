@@ -1,4 +1,5 @@
 import os
+import re
 
 from loguru import logger
 from tavily import TavilyClient
@@ -6,6 +7,20 @@ from tavily import TavilyClient
 from ..configs.setup import get_backend_settings
 
 settings = get_backend_settings()
+MAX_TAVILY_QUERY_LEN = 400
+
+
+def truncate_tavily_query(query: str, max_len: int = MAX_TAVILY_QUERY_LEN) -> str:
+    """Normalize and truncate Tavily query to API limit."""
+    cleaned = re.sub(r"\s+", " ", (query or "")).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+
+    truncated = cleaned[:max_len].rstrip()
+    logger.warning(
+        f"[TAVILY] Query too long ({len(cleaned)} chars). Truncated to {len(truncated)} chars."
+    )
+    return truncated
 
 
 def get_tavily_client():
@@ -23,10 +38,14 @@ def get_tavily_client():
         raise
 
 
-def tavily_search(query):
+def tavily_search(query: str):
     try:
+        safe_query = truncate_tavily_query(query)
+        if not safe_query:
+            raise ValueError("Empty Tavily query after normalization")
+
         client = get_tavily_client()
-        output_search = client.search(query).get("results")[:3]
+        output_search = client.search(safe_query).get("results")[:3]
         search_document = "Here are the retrieved documents from the internet:\n\n"
 
         for i, doc in enumerate(output_search):
