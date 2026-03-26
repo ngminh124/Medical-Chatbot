@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Bot, Check, Copy, RefreshCw, Square, ThumbsDown, ThumbsUp, User, Volume2 } from "lucide-react";
@@ -50,6 +50,87 @@ export default function Message({ message, onRegenerate }) {
   const [isSpeaking, setIsSpeaking] = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
   const utteranceRef = useRef(null);
+  const citationPrefix = `citation-${message.id}`;
+
+  const rawCitations = message?.metadata_?.citations || [];
+  const normalizedCitations = rawCitations.map((citation = {}) => {
+    const sourceAsUrl =
+      typeof citation.source === "string" && /^https?:\/\//.test(citation.source)
+        ? citation.source
+        : "";
+    return {
+      title: citation.title || citation.document_name || "Tài liệu tham khảo",
+      url: citation.url || citation.link || sourceAsUrl || "",
+      snippet: citation.snippet || citation.content || citation.text || "",
+      type: (citation.type || (citation.url ? "web" : "rag")).toLowerCase(),
+      score: typeof citation.score === "number" ? citation.score : null,
+    };
+  });
+
+  const scrollToCitation = (index) => {
+    const id = `${citationPrefix}-${index}`;
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    el.classList.add("ring-2", "ring-primary-300");
+    window.setTimeout(() => {
+      el.classList.remove("ring-2", "ring-primary-300");
+    }, 900);
+  };
+
+  const CitationRef = ({ index }) => {
+    const citation = normalizedCitations[index - 1];
+    if (!citation) return `[${index}]`;
+
+    return (
+      <span className="group relative inline-flex align-super">
+        <button
+          type="button"
+          onClick={() => scrollToCitation(index)}
+          className="ml-0.5 rounded px-1 text-[10px] font-semibold text-sky-700 transition-colors hover:bg-sky-100 dark:text-sky-300 dark:hover:bg-sky-900/40"
+          aria-label={`Xem nguồn tham khảo ${index}`}
+        >
+          [{index}]
+        </button>
+        <div className="pointer-events-none absolute bottom-full left-1/2 z-20 mb-2 hidden w-72 -translate-x-1/2 rounded-lg border border-gray-200 bg-white p-2 text-left text-xs text-gray-600 shadow-xl group-hover:block dark:border-gray-700 dark:bg-gray-900 dark:text-gray-300">
+          <p className="font-semibold text-gray-800 dark:text-gray-100">[{index}] {citation.title}</p>
+          {citation.snippet && <p className="mt-1 line-clamp-4">{citation.snippet}</p>}
+          {citation.url && <p className="mt-1 truncate text-primary-600 dark:text-primary-400">{citation.url}</p>}
+        </div>
+      </span>
+    );
+  };
+
+  const replaceCitationRefs = (node) => {
+    if (typeof node === "string") {
+      const parts = node.split(/(\[\d+\])/g);
+      return parts.map((part, idx) => {
+        const match = part.match(/^\[(\d+)\]$/);
+        if (!match) return part;
+        const index = Number(match[1]);
+        if (!Number.isFinite(index) || index < 1 || index > normalizedCitations.length) {
+          return part;
+        }
+        return <CitationRef key={`cite-ref-${idx}-${index}`} index={index} />;
+      });
+    }
+
+    if (Array.isArray(node)) {
+      return node.map((child) => replaceCitationRefs(child));
+    }
+
+    if (isValidElement(node)) {
+      const replacedChildren = replaceCitationRefs(node.props.children);
+      return cloneElement(node, { ...node.props, children: replacedChildren });
+    }
+
+    return node;
+  };
+
+  const MarkdownBlock = ({ children }) => {
+    const replaced = replaceCitationRefs(children);
+    return <>{Children.map(replaced, (child) => child)}</>;
+  };
 
   useEffect(() => {
     const supported = typeof window !== "undefined" && "speechSynthesis" in window;
@@ -164,15 +245,33 @@ export default function Message({ message, onRegenerate }) {
           </p>
         ) : (
           <div className="prose prose-base md:prose-lg dark:prose-invert max-w-none text-gray-800 dark:text-gray-200">
-            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              components={{
+                p: ({ children }) => <p><MarkdownBlock>{children}</MarkdownBlock></p>,
+                li: ({ children }) => <li><MarkdownBlock>{children}</MarkdownBlock></li>,
+                blockquote: ({ children }) => <blockquote><MarkdownBlock>{children}</MarkdownBlock></blockquote>,
+                td: ({ children }) => <td><MarkdownBlock>{children}</MarkdownBlock></td>,
+              }}
+            >
               {message.content}
             </ReactMarkdown>
           </div>
         )}
 
         {/* Citations */}
-        {!isUser && message.metadata_?.citations?.length > 0 && (
-          <Citations metadata={message.metadata_} />
+        {!isUser && normalizedCitations.length > 0 && (
+          <Citations
+            citations={normalizedCitations}
+            citationPrefix={citationPrefix}
+            onSelectCitation={scrollToCitation}
+          />
+        )}
+
+        {!isUser && message.metadata_ && normalizedCitations.length === 0 && (
+          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
+            Không có tài liệu tham khảo cho câu trả lời này.
+          </p>
         )}
 
         {/* Action buttons (assistant only) */}
