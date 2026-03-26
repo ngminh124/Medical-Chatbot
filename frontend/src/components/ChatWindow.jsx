@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { chatAPI } from "../api/chat";
 import Message, { MessageSkeleton, TypingIndicator } from "./Message";
+import WebSearchToggle from "./WebSearchToggle";
 import {
   ChevronDown,
   AlertCircle,
@@ -47,7 +48,17 @@ function ListeningIndicator({ visible, label }) {
 }
 
 /* ── Input area ───────────────────────────────────────────── */
-function InputArea({ value, onChange, onSend, disabled, isDictating, onToggleDictation, speechSupported }) {
+function InputArea({
+  value,
+  onChange,
+  onSend,
+  disabled,
+  isDictating,
+  onToggleDictation,
+  speechSupported,
+  webSearchEnabled,
+  onToggleWebSearch,
+}) {
   const textareaRef = useRef(null);
 
   // Auto-resize textarea
@@ -81,6 +92,11 @@ function InputArea({ value, onChange, onSend, disabled, isDictating, onToggleDic
             className="max-h-48 flex-1 resize-none bg-transparent py-2 text-base text-gray-800 placeholder-gray-400 outline-none disabled:opacity-60 dark:text-gray-200 dark:placeholder-gray-500"
           />
           <div className="mb-1 flex items-center gap-2">
+            <WebSearchToggle
+              enabled={webSearchEnabled}
+              onToggle={onToggleWebSearch}
+              disabled={disabled}
+            />
             <button
               onClick={onToggleDictation}
               disabled={disabled || !speechSupported}
@@ -122,6 +138,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const [isDictating, setIsDictating]     = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const messageListRef = useRef(null);
   const messagesEndRef = useRef(null);
   const speechRecognitionRef = useRef(null);
@@ -162,7 +179,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
 
     try {
       // ── Call /ask — one round-trip for user msg + RAG generation ──────────
-      const res = await chatAPI.ask(currentThreadId, content);
+      const res = await chatAPI.ask(currentThreadId, content, {
+        web_search_enabled: webSearchEnabled,
+      });
       const { user_message, assistant_message } = res.data;
 
       setMessages((prev) => [
@@ -186,7 +205,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
     } finally {
       setSending(false);
     }
-  }, [input, sending, threadId, onThreadCreated]);
+  }, [input, sending, threadId, onThreadCreated, webSearchEnabled]);
 
   const handleToggleDictation = useCallback(() => {
     const recognition = speechRecognitionRef.current;
@@ -322,6 +341,8 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           isDictating={isDictating}
           onToggleDictation={handleToggleDictation}
           speechSupported={speechSupported}
+          webSearchEnabled={webSearchEnabled}
+          onToggleWebSearch={() => setWebSearchEnabled((v) => !v)}
         />
       </div>
     );
@@ -372,6 +393,8 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           isDictating={isDictating}
           onToggleDictation={handleToggleDictation}
           speechSupported={speechSupported}
+          webSearchEnabled={webSearchEnabled}
+          onToggleWebSearch={() => setWebSearchEnabled((v) => !v)}
         />
       </div>
     );
@@ -419,6 +442,8 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         isDictating={isDictating}
         onToggleDictation={handleToggleDictation}
         speechSupported={speechSupported}
+        webSearchEnabled={webSearchEnabled}
+        onToggleWebSearch={() => setWebSearchEnabled((v) => !v)}
       />
     </div>
   );
