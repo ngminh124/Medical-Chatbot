@@ -43,6 +43,7 @@ def run_rag_pipeline(
     question: str,
     history: List[Dict[str, str]],
     top_k: int = 5,
+    web_search_enabled: bool | None = None,
 ) -> Dict[str, Any]:
     """Full RAG pipeline with graceful degradation at every step.
 
@@ -134,8 +135,15 @@ def run_rag_pipeline(
     use_tavily = False
     tavily_reason = ""
 
-    # Use Tavily for general route, or when medical retrieval is weak.
-    if tavily_enabled:
+    # Client override takes precedence if provided.
+    if web_search_enabled is True and tavily_enabled:
+        use_tavily = True
+        tavily_reason = "client_forced"
+    elif web_search_enabled is False:
+        use_tavily = False
+        tavily_reason = "client_disabled"
+    # Auto policy when client does not force behavior
+    elif tavily_enabled:
         if route == "general":
             use_tavily = True
             tavily_reason = "general_route"
@@ -299,11 +307,16 @@ def rag_query(
     """
     question = body.get("question", "").strip()
     history = body.get("history", [])
+    web_search_enabled = body.get("web_search_enabled")
     if not question:
         return {"answer": "Vui lòng nhập câu hỏi.", "citations": [], "route": ""}
 
     logger.info(f"[RAG] Direct query from user {current_user.id}: {question[:80]}")
-    result = run_rag_pipeline(question=question, history=history)
+    result = run_rag_pipeline(
+        question=question,
+        history=history,
+        web_search_enabled=web_search_enabled,
+    )
 
     return {
         "answer": result["answer"],
