@@ -65,13 +65,17 @@ class Citation(BaseModel):
     """A single retrieved document used as context for generation."""
     title: str = ""
     content: str = ""
+    snippet: str = ""
     source: str = ""
+    url: str = ""
+    type: str = "rag"
     score: float = 0.0
 
 
 class AskRequest(BaseModel):
     """Request body for the /ask endpoint."""
     content: str = Field(..., min_length=1, max_length=10000)
+    web_search_enabled: Optional[bool] = None
 
 
 class AskResponse(BaseModel):
