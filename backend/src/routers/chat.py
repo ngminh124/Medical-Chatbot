@@ -216,6 +216,7 @@ def ask(
             question=body.content,
             history=history,
             top_k=settings.top_k,
+            web_search_enabled=body.web_search_enabled,
         )
     except Exception as exc:
         logger.error(f"[ASK] RAG pipeline raised an unexpected exception: {exc}")
