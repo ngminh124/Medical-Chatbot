@@ -2,12 +2,14 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { chatAPI } from "../api/chat";
 import Message, { MessageSkeleton, TypingIndicator } from "./Message";
 import WebSearchToggle from "./WebSearchToggle";
+import { useSendMessage } from "../hooks/useSendMessage";
 import {
   ChevronDown,
   AlertCircle,
   BookOpen,
   Heart,
   Mic,
+  Square,
   Send,
   ShieldCheck,
   Stethoscope,
@@ -52,7 +54,9 @@ function InputArea({
   value,
   onChange,
   onSend,
+  onStopSending,
   disabled,
+  isSending,
   isDictating,
   onToggleDictation,
   speechSupported,
@@ -73,9 +77,12 @@ function InputArea({
   const handleKeyDown = (e) => {
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (isSending) return;
       onSend();
     }
   };
+
+  const canSend = value.trim().length > 0 && !disabled && !isSending;
 
   return (
     <div className="border-t border-gray-100 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
@@ -110,12 +117,16 @@ function InputArea({
               <Mic className="h-6 w-6" />
             </button>
             <button
-              onClick={onSend}
-              disabled={!value.trim() || disabled}
-              className="flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl bg-primary-600 text-white transition-all hover:bg-primary-700 disabled:cursor-not-allowed disabled:opacity-40"
-              title="Gửi (Enter)"
+              onClick={isSending ? onStopSending : () => onSend()}
+              disabled={!isSending && !canSend}
+              className={`flex h-11 w-11 flex-shrink-0 items-center justify-center rounded-xl text-white transition-all ${
+                isSending
+                  ? "bg-red-500 hover:bg-red-600"
+                  : "bg-primary-600 hover:bg-primary-700"
+              } disabled:cursor-not-allowed disabled:bg-gray-300 disabled:text-gray-500 disabled:opacity-70 dark:disabled:bg-gray-700 dark:disabled:text-gray-400`}
+              title={isSending ? "Dừng" : "Gửi (Enter)"}
             >
-              <Send className="h-6 w-6" />
+              {isSending ? <Square className="h-6 w-6" /> : <Send className="h-6 w-6" />}
             </button>
           </div>
         </div>
@@ -132,7 +143,6 @@ function InputArea({
 export default function ChatWindow({ threadId, onThreadCreated }) {
   const [messages, setMessages]           = useState([]);
   const [input, setInput]                 = useState("");
-  const [sending, setSending]             = useState(false);
   const [loadingMessages, setLoadingMessages] = useState(false);
   const [error, setError]                 = useState(null);
   const [isDictating, setIsDictating]     = useState(false);
@@ -144,9 +154,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const speechRecognitionRef = useRef(null);
   const dictationBaseTextRef = useRef("");
 
-  const handleSend = useCallback(async (contentOverride) => {
+  const performSend = useCallback(async (contentOverride, { signal } = {}) => {
     const content = (contentOverride ?? input).trim();
-    if (!content || sending) return;
+    if (!content) return;
 
     setError(null);
     let currentThreadId = threadId;
@@ -175,13 +185,12 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
     };
     setMessages((prev) => [...prev, tempUserMsg]);
     if (!contentOverride) setInput("");
-    setSending(true);
 
     try {
       // ── Call /ask — one round-trip for user msg + RAG generation ──────────
       const res = await chatAPI.ask(currentThreadId, content, {
         web_search_enabled: webSearchEnabled,
-      });
+      }, { signal });
       const { user_message, assistant_message } = res.data;
 
       setMessages((prev) => [
@@ -194,6 +203,10 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       setMessages((prev) => prev.filter((m) => m.id !== tempId));
       if (!contentOverride) setInput(content);
 
+      if (signal?.aborted || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
+        return;
+      }
+
       const status = err?.response?.status;
       if (status === 503) {
         setError("Dịch vụ AI đang không khả dụng. Vui lòng thử lại sau.");
@@ -202,10 +215,18 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       } else {
         setError("Đã có lỗi xảy ra khi xử lý yêu cầu. Vui lòng thử lại.");
       }
-    } finally {
-      setSending(false);
     }
-  }, [input, sending, threadId, onThreadCreated, webSearchEnabled]);
+  }, [input, threadId, onThreadCreated, webSearchEnabled]);
+
+  const {
+    isSending,
+    sendMessage,
+    stopSending,
+  } = useSendMessage(performSend);
+
+  const handleSend = useCallback((contentOverride) => {
+    sendMessage(contentOverride);
+  }, [sendMessage]);
 
   const handleToggleDictation = useCallback(() => {
     const recognition = speechRecognitionRef.current;
@@ -293,7 +314,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
     setShowScrollToBottom(false);
-  }, [messages, sending]);
+  }, [messages, isSending]);
 
   const updateScrollButtonVisibility = useCallback(() => {
     const el = messageListRef.current;
@@ -337,7 +358,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           value=""
           onChange={() => {}}
           onSend={() => {}}
+          onStopSending={() => {}}
           disabled
+          isSending={false}
           isDictating={isDictating}
           onToggleDictation={handleToggleDictation}
           speechSupported={speechSupported}
@@ -389,7 +412,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           value={input}
           onChange={setInput}
           onSend={handleSend}
-          disabled={sending}
+          onStopSending={stopSending}
+          disabled={isSending}
+          isSending={isSending}
           isDictating={isDictating}
           onToggleDictation={handleToggleDictation}
           speechSupported={speechSupported}
@@ -418,7 +443,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         ))}
 
         {/* Typing indicator while waiting for response */}
-        {sending && <TypingIndicator />}
+        {isSending && <TypingIndicator />}
 
         <div ref={messagesEndRef} />
       </div>
@@ -438,7 +463,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         value={input}
         onChange={setInput}
         onSend={handleSend}
-        disabled={sending}
+        onStopSending={stopSending}
+        disabled={isSending}
+        isSending={isSending}
         isDictating={isDictating}
         onToggleDictation={handleToggleDictation}
         speechSupported={speechSupported}
