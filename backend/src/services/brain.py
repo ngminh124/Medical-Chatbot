@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 from typing import Dict, List, Optional
 
 import httpx
@@ -402,7 +403,7 @@ def get_tavily_agent_answer(messages):
     3. Use vLLM (Qwen3) to generate final answer from search results
     """
     try:
-        from ..functions.web_search import tavily_search
+        from ..functions.web_search import tavily_search, truncate_tavily_query
 
         # Extract the latest user query from messages
         user_query = ""
@@ -414,8 +415,25 @@ def get_tavily_agent_answer(messages):
         if not user_query:
             return "Xin lỗi, không tìm thấy câu hỏi để tìm kiếm."
 
+        # If user_query is a long RAG prompt, try to extract only the original question.
+        extracted = None
+        patterns = [
+            r"\*\*Câu hỏi:\*\*\s*(.+?)(?:\n\n|$)",
+            r"Câu hỏi:\s*(.+?)(?:\n\n|$)",
+            r"Question:\s*(.+?)(?:\n\n|$)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, user_query, flags=re.IGNORECASE | re.DOTALL)
+            if m and m.group(1).strip():
+                extracted = m.group(1).strip()
+                break
+
+        search_query = truncate_tavily_query(extracted or user_query)
+        if not search_query:
+            return "Xin lỗi, không tìm thấy câu hỏi hợp lệ để tìm kiếm."
+
         # Search web via Tavily
-        observation = tavily_search(user_query)
+        observation = tavily_search(search_query)
 
         # Keep only recent messages to avoid token overflow
         recent_messages = _truncate_messages(messages, max_messages=6)
