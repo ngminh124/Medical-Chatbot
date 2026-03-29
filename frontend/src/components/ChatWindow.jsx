@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { chatAPI } from "../api/chat";
 import Message, { MessageSkeleton, TypingIndicator } from "./Message";
 import WebSearchToggle from "./WebSearchToggle";
@@ -8,6 +8,7 @@ import {
   AlertCircle,
   BookOpen,
   Heart,
+  List,
   Mic,
   Square,
   Send,
@@ -85,9 +86,9 @@ function InputArea({
   const canSend = value.trim().length > 0 && !disabled && !isSending;
 
   return (
-    <div className="border-t border-gray-100 bg-white p-4 dark:border-gray-800 dark:bg-gray-900">
-      <div className="mx-auto max-w-3xl">
-        <div className="flex items-end gap-3 rounded-2xl border border-gray-200 bg-white px-4 py-3 shadow-sm transition-colors focus-within:border-primary-300 focus-within:shadow-md dark:border-gray-700 dark:bg-gray-800 dark:focus-within:border-primary-600">
+    <div className="px-3 pb-4 sm:px-6 sm:pb-6">
+      <div className="mx-auto max-w-6xl">
+        <div className="flex min-h-[60px] items-end gap-3 rounded-3xl border border-gray-300/60 bg-gray-100/95 px-4 py-3 shadow-[0_8px_28px_rgba(15,23,42,0.12)] backdrop-blur transition-colors dark:border-white/10 dark:bg-slate-800 dark:shadow-[0_12px_30px_rgba(0,0,0,0.45)]">
           <textarea
             ref={textareaRef}
             value={value}
@@ -96,7 +97,7 @@ function InputArea({
             placeholder="Nhập câu hỏi của bạn... (Enter để gửi, Shift+Enter xuống dòng)"
             rows={1}
             disabled={disabled}
-            className="max-h-48 flex-1 resize-none bg-transparent py-2 text-base text-gray-800 placeholder-gray-400 outline-none disabled:opacity-60 dark:text-gray-200 dark:placeholder-gray-500"
+            className="max-h-48 flex-1 resize-none bg-transparent py-2.5 text-base text-gray-800 placeholder-gray-400 outline-none disabled:opacity-60 dark:text-gray-200 dark:placeholder-gray-500"
           />
           <div className="mb-1 flex items-center gap-2">
             <WebSearchToggle
@@ -131,7 +132,7 @@ function InputArea({
           </div>
         </div>
         <ListeningIndicator visible={isDictating} label="Đang nghe..." />
-        <p className="mt-2 text-center text-sm text-gray-400 dark:text-gray-600">
+        <p className="mt-3 text-center text-sm text-gray-400 dark:text-gray-600">
           Minqes cung cấp thông tin y khoa tham khảo. Luôn tham vấn bác sĩ cho các tình huống nghiêm trọng.
         </p>
       </div>
@@ -148,11 +149,16 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const [isDictating, setIsDictating]     = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [activeQuestionId, setActiveQuestionId] = useState(null);
+  const [desktopNavigatorOpen, setDesktopNavigatorOpen] = useState(false);
+  const [mobileNavigatorOpen, setMobileNavigatorOpen] = useState(false);
   const [webSearchEnabled, setWebSearchEnabled] = useState(false);
   const messageListRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const messageRefs = useRef({});
   const speechRecognitionRef = useRef(null);
   const dictationBaseTextRef = useRef("");
+  const desktopNavigatorCloseTimerRef = useRef(null);
 
   const performSend = useCallback(async (contentOverride, { signal } = {}) => {
     const content = (contentOverride ?? input).trim();
@@ -332,6 +338,109 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
     updateScrollButtonVisibility();
   }, [messages, updateScrollButtonVisibility]);
 
+  useEffect(() => {
+    const handleResize = () => {
+      updateScrollButtonVisibility();
+    };
+
+    window.addEventListener("resize", handleResize);
+    return () => window.removeEventListener("resize", handleResize);
+  }, [updateScrollButtonVisibility]);
+
+  const scrollToMessage = useCallback((messageId) => {
+    const node = messageRefs.current[messageId];
+    if (!node) return;
+    node.scrollIntoView({ behavior: "smooth", block: "start" });
+  }, []);
+
+  const openDesktopNavigator = useCallback(() => {
+    if (desktopNavigatorCloseTimerRef.current) {
+      window.clearTimeout(desktopNavigatorCloseTimerRef.current);
+      desktopNavigatorCloseTimerRef.current = null;
+    }
+    setDesktopNavigatorOpen(true);
+  }, []);
+
+  const closeDesktopNavigatorWithDelay = useCallback(() => {
+    if (desktopNavigatorCloseTimerRef.current) {
+      window.clearTimeout(desktopNavigatorCloseTimerRef.current);
+    }
+    desktopNavigatorCloseTimerRef.current = window.setTimeout(() => {
+      setDesktopNavigatorOpen(false);
+      desktopNavigatorCloseTimerRef.current = null;
+    }, 220);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (desktopNavigatorCloseTimerRef.current) {
+        window.clearTimeout(desktopNavigatorCloseTimerRef.current);
+      }
+    };
+  }, []);
+
+  const userQuestionItems = useMemo(
+    () => messages
+      .filter((msg) => msg.role === "user")
+      .map((msg, index) => ({
+        id: msg.id,
+        label: `Câu hỏi ${index + 1}`,
+        content: (msg.content || "").replace(/\s+/g, " ").trim(),
+      })),
+    [messages],
+  );
+
+  useEffect(() => {
+    const root = messageListRef.current;
+    if (!root || userQuestionItems.length === 0) {
+      setActiveQuestionId(null);
+      return;
+    }
+
+    const visibilityMap = new Map();
+    const observer = new IntersectionObserver(
+      (entries) => {
+        entries.forEach((entry) => {
+          const id = entry.target.getAttribute("data-message-id");
+          if (!id) return;
+          visibilityMap.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+        });
+
+        let maxId = null;
+        let maxRatio = 0;
+        visibilityMap.forEach((ratio, id) => {
+          if (ratio > maxRatio) {
+            maxRatio = ratio;
+            maxId = id;
+          }
+        });
+
+        if (maxId) {
+          setActiveQuestionId(maxId);
+        }
+      },
+      {
+        root,
+        threshold: [0, 0.2, 0.4, 0.6, 0.8, 1],
+        rootMargin: "-15% 0px -45% 0px",
+      },
+    );
+
+    userQuestionItems.forEach((item) => {
+      const node = messageRefs.current[item.id];
+      if (node) {
+        node.setAttribute("data-message-id", item.id);
+        observer.observe(node);
+      }
+    });
+
+    if (!activeQuestionId) {
+      setActiveQuestionId(userQuestionItems[0]?.id ?? null);
+    }
+
+    return () => observer.disconnect();
+  }, [userQuestionItems, activeQuestionId]);
+
   /* Regenerate last assistant message */
   const handleRegenerate = useCallback(async (assistantMsg) => {
     // Find the user message that preceded this assistant message
@@ -348,7 +457,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   /* ── Skeleton while loading history ─────────────────────── */
   if (loadingMessages) {
     return (
-      <div className="flex h-full flex-col bg-white dark:bg-gray-900">
+      <div className="flex h-full flex-col bg-white dark:bg-[#0f172a]">
         <div className="flex-1 overflow-y-auto">
           {[...Array(4)].map((_, i) => (
             <MessageSkeleton key={i} />
@@ -374,7 +483,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   /* ── Welcome screen ──────────────────────────────────────── */
   if (!threadId && messages.length === 0) {
     return (
-      <div className="flex h-full flex-col bg-white dark:bg-gray-900">
+      <div className="flex h-full flex-col bg-white dark:bg-[#0f172a]">
         <div className="flex flex-1 flex-col items-center justify-center px-4">
           <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-primary-100 dark:bg-primary-900/30">
             <Heart className="h-12 w-12 text-primary-600 dark:text-primary-400" />
@@ -427,51 +536,180 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
 
   /* ── Active chat ─────────────────────────────────────────── */
   return (
-    <div className="relative flex h-full flex-col bg-white dark:bg-gray-900">
-      {/* Message list */}
-      <div
-        ref={messageListRef}
-        onScroll={updateScrollButtonVisibility}
-        className="flex-1 overflow-y-auto divide-y divide-gray-100 dark:divide-gray-800"
-      >
-        {messages.map((msg) => (
-          <Message
-            key={msg.id}
-            message={msg}
-            onRegenerate={msg.role === "assistant" ? handleRegenerate : undefined}
-          />
-        ))}
-
-        {/* Typing indicator while waiting for response */}
-        {isSending && <TypingIndicator />}
-
-        <div ref={messagesEndRef} />
-      </div>
-
-      {showScrollToBottom && (
-        <button
-          onClick={handleScrollToBottom}
-          className="absolute bottom-28 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-gray-200 bg-white text-primary-600 shadow-lg transition-all hover:-translate-y-0.5 hover:bg-primary-50 dark:border-gray-700 dark:bg-gray-800 dark:text-primary-300 dark:hover:bg-gray-700"
-          title="Cuộn xuống tin nhắn mới nhất"
+    <div className="relative h-full overflow-hidden bg-white dark:bg-[#0f172a]">
+      <div className="relative mx-auto flex h-full w-full flex-col">
+        {/* Message list */}
+        <div
+          ref={messageListRef}
+          onScroll={updateScrollButtonVisibility}
+          className="relative flex-1 overflow-y-auto bg-transparent px-2 pb-44 pt-6 sm:px-6 sm:pb-48 sm:pt-8"
         >
-          <ChevronDown className="h-6 w-6" />
-        </button>
-      )}
+          <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 sm:gap-10">
+          {messages.map((msg) => (
+            <div
+              key={msg.id}
+              ref={(el) => {
+                if (el) {
+                  messageRefs.current[msg.id] = el;
+                } else {
+                  delete messageRefs.current[msg.id];
+                }
+              }}
+            >
+              <Message
+                message={msg}
+                onRegenerate={msg.role === "assistant" ? handleRegenerate : undefined}
+              />
+            </div>
+          ))}
 
-      <ErrorBanner message={error} onDismiss={() => setError(null)} />
-      <InputArea
-        value={input}
-        onChange={setInput}
-        onSend={handleSend}
-        onStopSending={stopSending}
-        disabled={isSending}
-        isSending={isSending}
-        isDictating={isDictating}
-        onToggleDictation={handleToggleDictation}
-        speechSupported={speechSupported}
-        webSearchEnabled={webSearchEnabled}
-        onToggleWebSearch={() => setWebSearchEnabled((v) => !v)}
-      />
+          {/* Typing indicator while waiting for response */}
+          {isSending && <TypingIndicator />}
+
+          <div ref={messagesEndRef} />
+          </div>
+        </div>
+
+        {showScrollToBottom && (
+          <button
+            onClick={handleScrollToBottom}
+            className="absolute bottom-36 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-gray-200 bg-white text-primary-600 shadow-lg transition-all hover:-translate-y-0.5 hover:bg-primary-50 dark:border-gray-700 dark:bg-gray-800 dark:text-primary-300 dark:hover:bg-gray-700"
+            title="Cuộn xuống tin nhắn mới nhất"
+          >
+            <ChevronDown className="h-6 w-6" />
+          </button>
+        )}
+
+        <div className="absolute inset-x-0 bottom-0 z-20">
+          <div className="pointer-events-none h-12 bg-gradient-to-t from-white to-transparent dark:from-[#0f172a]" />
+          <div className="bg-white dark:bg-[#0f172a]">
+            <ErrorBanner message={error} onDismiss={() => setError(null)} />
+            <InputArea
+              value={input}
+              onChange={setInput}
+              onSend={handleSend}
+              onStopSending={stopSending}
+              disabled={isSending}
+              isSending={isSending}
+              isDictating={isDictating}
+              onToggleDictation={handleToggleDictation}
+              speechSupported={speechSupported}
+              webSearchEnabled={webSearchEnabled}
+              onToggleWebSearch={() => setWebSearchEnabled((v) => !v)}
+            />
+          </div>
+        </div>
+
+        {/* Floating navigator (desktop) */}
+        {userQuestionItems.length > 0 && (
+          <>
+            <div className="fixed right-4 top-1/2 z-30 hidden -translate-y-1/2 lg:block">
+              <div
+                className="relative flex items-center"
+                onMouseEnter={openDesktopNavigator}
+                onMouseLeave={closeDesktopNavigatorWithDelay}
+              >
+                <div className="max-h-44 w-[92px] overflow-y-auto rounded-2xl border border-white/10 bg-black/50 px-2 py-2 shadow-lg backdrop-blur-xl">
+                  <div   className="space-y-2">
+                    {userQuestionItems.map((item) => {
+                      const isActive = item.id === activeQuestionId;
+                      return (
+                        <button
+                          key={item.id}
+                          onClick={() => scrollToMessage(item.id)}
+                          className={`group/nav relative flex w-full items-center justify-center rounded-md border-none bg-transparent py-1 ${
+                            isActive ? "" : "opacity-80 hover:opacity-100"
+                          }`}
+                          title={item.content}
+                        >
+                          <span
+                            className={`h-2 w-12 rounded-full transition-all ${
+                              isActive
+                                ? "bg-primary-400"
+                                : "bg-white/35 group-hover/nav:bg-white/60"
+                            }`}
+                          />
+                          <span className="pointer-events-none absolute right-full mr-2 hidden w-72 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-left text-xs text-white/90 shadow-xl backdrop-blur-xl group-hover/nav:block">
+                            {item.content}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="absolute right-[92px] top-1/2 h-20 w-5 -translate-y-1/2 bg-transparent" />
+
+                <div
+                  className={`absolute right-[102px] top-1/2 max-h-[68vh] w-[320px] -translate-y-1/2 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-3 shadow-xl backdrop-blur-xl transition-all duration-200 ${
+                    desktopNavigatorOpen
+                      ? "pointer-events-auto translate-x-0 opacity-100"
+                      : "pointer-events-none translate-x-1 opacity-0"
+                  }`}
+                >
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/70">
+                    Mục lục câu hỏi
+                  </p>
+                  <div className="space-y-1.5">
+                    {userQuestionItems.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => scrollToMessage(item.id)}
+                        className={`w-full rounded-xl border-none px-3 py-2 text-left text-sm transition-colors ${
+                          item.id === activeQuestionId
+                            ? "bg-white/15 text-white"
+                            : "bg-transparent text-white/85 hover:bg-white/10 hover:text-white"
+                        }`}
+                      >
+                        <span className="block text-[11px] text-white/55">{item.label}</span>
+                        <span className="line-clamp-2 block">{item.content}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Mobile / tablet navigator toggle */}
+            <div className="fixed bottom-28 right-4 z-30 lg:hidden">
+              <button
+                onClick={() => setMobileNavigatorOpen((v) => !v)}
+                className="flex h-11 w-11 items-center justify-center rounded-full border border-white/10 bg-black/60 text-white shadow-lg backdrop-blur-md"
+                title="Mở mục lục câu hỏi"
+              >
+                <List className="h-5 w-5" />
+              </button>
+
+              {mobileNavigatorOpen && (
+                <div className="absolute bottom-14 right-0 max-h-[55vh] w-[280px] overflow-y-auto rounded-2xl border border-white/10 bg-black/70 p-3 shadow-xl backdrop-blur-xl">
+                  <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-white/70">
+                    Mục lục câu hỏi
+                  </p>
+                  <div className="space-y-1.5">
+                    {userQuestionItems.map((item) => (
+                      <button
+                        key={item.id}
+                        onClick={() => {
+                          scrollToMessage(item.id);
+                          setMobileNavigatorOpen(false);
+                        }}
+                        className={`w-full rounded-xl border-none px-3 py-2 text-left text-sm transition-colors ${
+                          item.id === activeQuestionId
+                            ? "bg-white/15 text-white"
+                            : "bg-transparent text-white/85 hover:bg-white/10 hover:text-white"
+                        }`}
+                      >
+                        <span className="block text-[11px] text-white/55">{item.label}</span>
+                        <span className="line-clamp-2 block">{item.content}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </div>
     </div>
   );
 }
