@@ -280,30 +280,30 @@ export default function Message({ message, onRegenerate }) {
 
         {/* Action buttons (assistant only) */}
         {!isUser && (
-          <div className="mt-3 flex items-center gap-2">
+          <div className="mt-3 flex items-center gap-1.5">
             {/* Speak */}
             <button
               onClick={handleSpeak}
               disabled={!speechSupported}
-              className={`rounded-lg p-1.5 transition-colors ${
+              className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 isSpeaking
                   ? "bg-primary-100 text-primary-600 dark:bg-primary-900/30 dark:text-primary-300"
                   : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-primary-600 dark:hover:text-primary-300"
               } disabled:cursor-not-allowed disabled:opacity-40`}
               title={isSpeaking ? "Dừng đọc" : "Đọc nội dung"}
             >
-              {isSpeaking ? <Square className="h-6 w-6" /> : <Volume2 className="h-6 w-6" />}
+              {isSpeaking ? <Square className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
             </button>
 
             {/* Copy */}
             <button
               onClick={handleCopy}
-              className="rounded-lg p-1.5 text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
               title="Sao chép"
             >
               {copied
-                ? <Check className="h-6 w-6 text-green-500" />
-                : <Copy className="h-6 w-6" />}
+                ? <Check className="h-5 w-5 text-green-500" />
+                : <Copy className="h-5 w-5" />}
             </button>
 
             {/* Regenerate */}
@@ -311,42 +311,42 @@ export default function Message({ message, onRegenerate }) {
               <button
                 onClick={handleRegenerate}
                 disabled={regenerating}
-                className="rounded-lg p-1.5 text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-40"
                 title="Tạo lại"
               >
-                <RefreshCw className={`h-6 w-6 ${regenerating ? "animate-spin" : ""}`} />
+                <RefreshCw className={`h-5 w-5 ${regenerating ? "animate-spin" : ""}`} />
               </button>
             )}
 
             {/* Divider */}
-            <span className="mx-0.5 h-6 w-px bg-gray-200 dark:bg-gray-700" />
+            <span className="mx-1 h-5 w-px bg-gray-200 dark:bg-gray-700" />
 
             {/* Thumbs up */}
             <button
               onClick={() => handleFeedback("up")}
               disabled={!!feedbackGiven}
-              className={`rounded p-1 transition-colors ${
+              className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 feedbackGiven === "up"
                   ? "text-green-500"
                   : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
               } disabled:cursor-default`}
               title="Hữu ích"
             >
-              <ThumbsUp className="h-6 w-6" />
+              <ThumbsUp className="h-5 w-5" />
             </button>
 
             {/* Thumbs down */}
             <button
               onClick={() => handleFeedback("down")}
               disabled={!!feedbackGiven}
-              className={`rounded p-1 transition-colors ${
+              className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 feedbackGiven === "down"
                   ? "text-red-500"
                   : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
               } disabled:cursor-default`}
               title="Chưa hữu ích"
             >
-              <ThumbsDown className="h-6 w-6" />
+              <ThumbsDown className="h-5 w-5" />
             </button>
           </div>
         )}
