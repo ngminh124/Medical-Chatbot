@@ -8,8 +8,8 @@ import { chatAPI } from "../api/chat";
 /* ── Skeleton row ─────────────────────────────────────────── */
 export function MessageSkeleton() {
   return (
-    <div className="flex gap-4 bg-gray-50/80 px-4 py-4 dark:bg-gray-800/50">
-      <div className="skeleton h-10 w-10 flex-shrink-0 rounded-xl" />
+    <div className="mx-auto flex w-full max-w-6xl gap-4 px-3 py-1 sm:px-4">
+      <div className="skeleton h-10 w-10 flex-shrink-0 rounded-2xl" />
       <div className="flex-1 space-y-3 pt-1">
         <div className="skeleton h-4 w-32 rounded" />
         <div className="skeleton h-5 w-full rounded" />
@@ -23,11 +23,11 @@ export function MessageSkeleton() {
 /* ── Typing indicator ─────────────────────────────────────── */
 export function TypingIndicator() {
   return (
-    <div className="animate-fade-in-up flex gap-4 bg-gray-50/80 px-4 py-4 dark:bg-gray-800/50">
-      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
+    <div className="animate-fade-in-up mx-auto flex w-full max-w-6xl gap-4 px-3 py-1 sm:px-4">
+      <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400">
         <Bot className="h-6 w-6" />
       </div>
-      <div className="flex flex-col">
+      <div className="flex flex-col px-1 py-1">
         <p className="mb-2 text-sm font-medium text-gray-500 dark:text-gray-400">
           Minqes
         </p>
@@ -216,15 +216,13 @@ export default function Message({ message, onRegenerate }) {
 
   return (
     <div
-      className={`animate-fade-in-up flex gap-4 px-4 py-4 ${
-        isUser
-          ? "bg-white dark:bg-gray-900"
-          : "bg-gray-50/80 dark:bg-gray-800/50"
+      className={`animate-fade-in-up mx-auto flex w-full max-w-6xl gap-4 px-3 py-1 sm:px-4 ${
+        isUser ? "flex-row-reverse justify-start" : "justify-start"
       }`}
     >
       {/* Avatar */}
       <div
-        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-xl ${
+        className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl ${
           isUser
             ? "bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400"
             : "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
@@ -234,7 +232,13 @@ export default function Message({ message, onRegenerate }) {
       </div>
 
       {/* Content */}
-      <div className="min-w-0 flex-1">
+      <div
+        className={`min-w-0 max-w-[88%] rounded-2xl px-4 py-3 sm:max-w-[82%] sm:px-5 sm:py-4 ${
+          isUser
+            ? "bg-primary-100 text-gray-900 dark:bg-primary-900/35 dark:text-gray-100"
+            : "bg-transparent px-1 py-1"
+        }`}
+      >
         <p className="mb-2 text-sm font-medium text-gray-500 dark:text-gray-400">
           {isUser ? "Bạn" : "Minqes"}
         </p>
