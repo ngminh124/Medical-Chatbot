@@ -350,6 +350,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const scrollToMessage = useCallback((messageId) => {
     const node = messageRefs.current[messageId];
     if (!node) return;
+    setActiveQuestionId(messageId);
     node.scrollIntoView({ behavior: "smooth", block: "start" });
   }, []);
 
@@ -397,32 +398,64 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       return;
     }
 
-    const visibilityMap = new Map();
+    const observedState = new Map();
+
+    const pickActiveQuestionTopDown = () => {
+      const intersecting = [];
+      observedState.forEach((state, id) => {
+        if (state.isIntersecting) {
+          intersecting.push({ id, top: state.top, ratio: state.ratio });
+        }
+      });
+
+      if (intersecting.length > 0) {
+        const topSectionCandidates = intersecting
+          .filter((item) => item.top >= 0)
+          .sort((a, b) => a.top - b.top);
+
+        const picked = topSectionCandidates[0]
+          ?? intersecting.sort((a, b) => b.top - a.top)[0];
+
+        if (picked?.id) {
+          setActiveQuestionId((prev) => (prev === picked.id ? prev : picked.id));
+        }
+        return;
+      }
+
+      // Fallback: choose the latest question whose top has passed current scroll position.
+      const currentScrollTop = root.scrollTop;
+      const nearestPassed = userQuestionItems
+        .map((item) => ({ id: item.id, node: messageRefs.current[item.id] }))
+        .filter((item) => item.node)
+        .filter((item) => item.node.offsetTop <= currentScrollTop + 12)
+        .sort((a, b) => b.node.offsetTop - a.node.offsetTop)[0];
+
+      const fallbackId = nearestPassed?.id ?? userQuestionItems[0]?.id ?? null;
+      if (fallbackId) {
+        setActiveQuestionId((prev) => (prev === fallbackId ? prev : fallbackId));
+      }
+    };
+
     const observer = new IntersectionObserver(
       (entries) => {
         entries.forEach((entry) => {
           const id = entry.target.getAttribute("data-message-id");
           if (!id) return;
-          visibilityMap.set(id, entry.isIntersecting ? entry.intersectionRatio : 0);
+          const rootTop = entry.rootBounds?.top ?? 0;
+          const relativeTop = entry.boundingClientRect.top - rootTop;
+          observedState.set(id, {
+            isIntersecting: entry.isIntersecting,
+            ratio: entry.intersectionRatio,
+            top: relativeTop,
+          });
         });
 
-        let maxId = null;
-        let maxRatio = 0;
-        visibilityMap.forEach((ratio, id) => {
-          if (ratio > maxRatio) {
-            maxRatio = ratio;
-            maxId = id;
-          }
-        });
-
-        if (maxId) {
-          setActiveQuestionId(maxId);
-        }
+        pickActiveQuestionTopDown();
       },
       {
         root,
-        threshold: [0, 0.2, 0.4, 0.6, 0.8, 1],
-        rootMargin: "-15% 0px -45% 0px",
+        threshold: [0, 0.01, 0.1, 0.25, 0.5, 0.75, 1],
+        rootMargin: "0px 0px -80% 0px",
       },
     );
 
@@ -434,12 +467,10 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       }
     });
 
-    if (!activeQuestionId) {
-      setActiveQuestionId(userQuestionItems[0]?.id ?? null);
-    }
+    pickActiveQuestionTopDown();
 
     return () => observer.disconnect();
-  }, [userQuestionItems, activeQuestionId]);
+  }, [userQuestionItems]);
 
   /* Regenerate last assistant message */
   const handleRegenerate = useCallback(async (assistantMsg) => {
@@ -458,7 +489,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   if (loadingMessages) {
     return (
       <div className="flex h-full flex-col bg-white dark:bg-[#0f172a]">
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto">
           {[...Array(4)].map((_, i) => (
             <MessageSkeleton key={i} />
           ))}
@@ -484,7 +515,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   if (!threadId && messages.length === 0) {
     return (
       <div className="flex h-full flex-col bg-white dark:bg-[#0f172a]">
-        <div className="flex flex-1 flex-col items-center justify-center px-4">
+        <div className="min-h-0 flex flex-1 flex-col items-center justify-center px-4">
           <div className="mb-6 flex h-20 w-20 items-center justify-center rounded-3xl bg-primary-100 dark:bg-primary-900/30">
             <Heart className="h-12 w-12 text-primary-600 dark:text-primary-400" />
           </div>
@@ -542,7 +573,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         <div
           ref={messageListRef}
           onScroll={updateScrollButtonVisibility}
-          className="relative flex-1 overflow-y-auto bg-transparent px-2 pb-44 pt-6 sm:px-6 sm:pb-48 sm:pt-8"
+          className="relative min-h-0 flex-1 overflow-y-auto bg-transparent px-2 pb-4 pt-6 sm:px-6 sm:pb-6 sm:pt-8"
         >
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 sm:gap-10">
           {messages.map((msg) => (
@@ -573,15 +604,15 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         {showScrollToBottom && (
           <button
             onClick={handleScrollToBottom}
-            className="absolute bottom-36 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-gray-200 bg-white text-primary-600 shadow-lg transition-all hover:-translate-y-0.5 hover:bg-primary-50 dark:border-gray-700 dark:bg-gray-800 dark:text-primary-300 dark:hover:bg-gray-700"
+            className="absolute bottom-28 left-1/2 z-20 flex h-11 w-11 -translate-x-1/2 items-center justify-center rounded-full border border-gray-200 bg-white text-primary-600 shadow-lg transition-all hover:-translate-y-0.5 hover:bg-primary-50 dark:border-gray-700 dark:bg-gray-800 dark:text-primary-300 dark:hover:bg-gray-700 sm:bottom-32"
             title="Cuộn xuống tin nhắn mới nhất"
           >
             <ChevronDown className="h-6 w-6" />
           </button>
         )}
 
-        <div className="absolute inset-x-0 bottom-0 z-20">
-          <div className="pointer-events-none h-12 bg-gradient-to-t from-white to-transparent dark:from-[#0f172a]" />
+        <div className="sticky bottom-0 z-20 shrink-0 bg-white dark:bg-[#0f172a] relative">
+          <div className="pointer-events-none absolute inset-x-0 -top-12 h-12 bg-gradient-to-t from-white to-transparent dark:from-[#0f172a]" />
           <div className="bg-white dark:bg-[#0f172a]">
             <ErrorBanner message={error} onDismiss={() => setError(null)} />
             <InputArea
@@ -609,27 +640,27 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
                 onMouseEnter={openDesktopNavigator}
                 onMouseLeave={closeDesktopNavigatorWithDelay}
               >
-                <div className="max-h-44 w-[92px] overflow-y-auto rounded-2xl border border-white/10 bg-black/50 px-2 py-2 shadow-lg backdrop-blur-xl">
-                  <div   className="space-y-2">
+                <div className="max-h-[216px] w-[98px] overflow-y-auto rounded-2xl border border-white/10 bg-black/45 px-2 py-2 shadow-lg backdrop-blur-xl">
+                  <div className="space-y-2">
                     {userQuestionItems.map((item) => {
                       const isActive = item.id === activeQuestionId;
                       return (
                         <button
                           key={item.id}
                           onClick={() => scrollToMessage(item.id)}
-                          className={`group/nav relative flex w-full items-center justify-center rounded-md border-none bg-transparent py-1 ${
-                            isActive ? "" : "opacity-80 hover:opacity-100"
+                          className={`group/nav relative flex w-full items-center justify-center rounded-md border-none bg-transparent py-1 transition-all ${
+                            isActive ? "opacity-100" : "opacity-75 hover:opacity-100"
                           }`}
                           title={item.content}
                         >
                           <span
-                            className={`h-2 w-12 rounded-full transition-all ${
+                            className={`h-2 w-12 rounded-full transition-all duration-200 ${
                               isActive
-                                ? "bg-primary-400"
-                                : "bg-white/35 group-hover/nav:bg-white/60"
+                                ? "bg-primary-400 shadow-[0_0_0_1px_rgba(255,255,255,0.25),0_0_16px_rgba(56,189,248,0.55)]"
+                                : "bg-white/30 group-hover/nav:bg-white/60"
                             }`}
                           />
-                          <span className="pointer-events-none absolute right-full mr-2 hidden w-72 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-left text-xs text-white/90 shadow-xl backdrop-blur-xl group-hover/nav:block">
+                          <span className="pointer-events-none absolute right-full mr-2 w-72 rounded-xl border border-white/10 bg-black/65 px-3 py-2 text-left text-xs text-white/90 opacity-0 shadow-xl backdrop-blur-xl transition-all duration-150 group-hover/nav:translate-x-0 group-hover/nav:opacity-100">
                             {item.content}
                           </span>
                         </button>
@@ -641,7 +672,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
                 <div className="absolute right-[92px] top-1/2 h-20 w-5 -translate-y-1/2 bg-transparent" />
 
                 <div
-                  className={`absolute right-[102px] top-1/2 max-h-[68vh] w-[320px] -translate-y-1/2 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-3 shadow-xl backdrop-blur-xl transition-all duration-200 ${
+                  className={`absolute right-[108px] top-1/2 max-h-[68vh] w-[320px] -translate-y-1/2 overflow-y-auto rounded-2xl border border-white/10 bg-black/60 p-3 shadow-xl backdrop-blur-xl transition-all duration-200 ${
                     desktopNavigatorOpen
                       ? "pointer-events-auto translate-x-0 opacity-100"
                       : "pointer-events-none translate-x-1 opacity-0"
@@ -655,10 +686,10 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
                       <button
                         key={item.id}
                         onClick={() => scrollToMessage(item.id)}
-                        className={`w-full rounded-xl border-none px-3 py-2 text-left text-sm transition-colors ${
+                        className={`w-full rounded-xl border-l-2 px-3 py-2 text-left text-sm transition-all duration-200 ${
                           item.id === activeQuestionId
-                            ? "bg-white/15 text-white"
-                            : "bg-transparent text-white/85 hover:bg-white/10 hover:text-white"
+                            ? "border-l-primary-300 bg-white/16 text-white"
+                            : "border-l-transparent bg-transparent text-white/80 hover:bg-white/10 hover:text-white"
                         }`}
                       >
                         <span className="block text-[11px] text-white/55">{item.label}</span>
