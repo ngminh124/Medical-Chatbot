@@ -138,26 +138,14 @@ def run_rag_pipeline(
 
     # ── 5.5 Optional Tavily fallback ─────────────────────────────────────────
     tavily_enabled = bool(settings.tavily_api_key or os.getenv("TAVILY_API_KEY"))
-    use_tavily = False
+    use_tavily = bool(web_search_enabled) and tavily_enabled
     tavily_reason = ""
-
-    # Client override takes precedence if provided.
-    if web_search_enabled is True and tavily_enabled:
-        use_tavily = True
-        tavily_reason = "client_forced"
-    elif web_search_enabled is False:
-        use_tavily = False
+    if web_search_enabled is True and not tavily_enabled:
+        tavily_reason = "tavily_unavailable"
+    elif web_search_enabled is True and tavily_enabled:
+        tavily_reason = "client_enabled"
+    else:
         tavily_reason = "client_disabled"
-    # Auto policy when client does not force behavior
-    elif tavily_enabled:
-        if route == "general":
-            use_tavily = True
-            tavily_reason = "general_route"
-        elif route == "medical" and (not citations or retrieval_confidence < 0.5):
-            use_tavily = True
-            tavily_reason = (
-                "no_documents" if not citations else f"low_confidence:{retrieval_confidence:.3f}"
-            )
 
     if use_tavily:
         try:
@@ -176,10 +164,9 @@ def run_rag_pipeline(
 
             if web_answer and not web_answer.startswith("Xin lỗi"):
                 web_search_used = True
-                merged_citations = [*citations, *web_citations]
                 return {
                     "answer": web_answer,
-                    "citations": merged_citations,
+                    "citations": web_citations,
                     "route": f"{route}_web",
                     "web_search_used": web_search_used,
                     "web_search_reason": tavily_reason,
@@ -207,7 +194,8 @@ def run_rag_pipeline(
 
     return {
         "answer": answer,
-        "citations": citations,
+        # Never expose local RAG citations to client payload.
+        "citations": [],
         "route": route,
         "web_search_used": web_search_used,
         "web_search_reason": tavily_reason,
