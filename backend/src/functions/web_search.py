@@ -1,6 +1,7 @@
 import os
 import re
 from typing import Dict, List, Tuple
+from urllib.parse import urlparse
 
 from loguru import logger
 from tavily import TavilyClient
@@ -9,6 +10,27 @@ from ..configs.setup import get_backend_settings
 
 settings = get_backend_settings()
 MAX_TAVILY_QUERY_LEN = 400
+
+
+def _extract_domain(url: str) -> str:
+    try:
+        return urlparse(url).hostname.replace("www.", "") if url else ""
+    except Exception:
+        return ""
+
+
+def _build_favicon_url(url: str) -> str:
+    domain = _extract_domain(url)
+    if not domain:
+        return ""
+    return f"https://www.google.com/s2/favicons?domain={domain}&sz=64"
+
+
+def _clean_snippet(text: str, max_len: int = 320) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len].rstrip() + "…"
 
 
 def truncate_tavily_query(query: str, max_len: int = MAX_TAVILY_QUERY_LEN) -> str:
@@ -43,16 +65,21 @@ def _normalize_tavily_results(results: List[dict], max_results: int = 3) -> List
     """Normalize Tavily raw results into frontend-friendly citation items."""
     normalized: List[Dict] = []
     for doc in (results or [])[:max_results]:
+        url = doc.get("url", "")
+        domain = _extract_domain(url)
+        snippet = _clean_snippet(doc.get("content", "No content available"))
         normalized.append(
             {
-                "title": doc.get("title", "Untitled"),
-                "url": doc.get("url", ""),
-                "snippet": doc.get("content", "No content available"),
+                "title": doc.get("title") or domain or "Nguồn web",
+                "url": url,
+                "snippet": snippet,
                 "type": "web",
                 "score": float(doc.get("score", 0.0) or 0.0),
+                "domain": domain,
+                "favicon": _build_favicon_url(url),
                 # backward compatibility with existing UI fallbacks
-                "content": doc.get("content", "No content available"),
-                "source": doc.get("url", ""),
+                "content": snippet,
+                "source": url,
             }
         )
     return normalized
