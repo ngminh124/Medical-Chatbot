@@ -1,6 +1,8 @@
 """Chat router — threads, messages, feedbacks, RAG ask."""
 
-from typing import Optional
+import re
+from typing import Any, Optional
+from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -28,6 +30,103 @@ from ..schemas.chat import (
 
 settings = get_backend_settings()
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
+
+
+def _is_http_url(url: str) -> bool:
+    return isinstance(url, str) and url.startswith(("http://", "https://"))
+
+
+def _clean_snippet(text: str, max_len: int = 320) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= max_len:
+        return cleaned
+    return cleaned[:max_len].rstrip() + "…"
+
+
+def _normalize_web_citations(citations: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
+    web_citations: list[dict[str, Any]] = []
+    for citation in citations or []:
+        if not isinstance(citation, dict):
+            continue
+
+        url = (
+            citation.get("url")
+            or citation.get("link")
+            or (citation.get("source") if _is_http_url(citation.get("source", "")) else "")
+        )
+        if not _is_http_url(url):
+            continue
+
+        ctype = str(citation.get("type") or "web").lower()
+        if ctype != "web":
+            continue
+
+        domain = ""
+        try:
+            domain = (urlparse(url).hostname or "").replace("www.", "")
+        except Exception:
+            domain = ""
+
+        snippet = _clean_snippet(
+            citation.get("snippet") or citation.get("content") or citation.get("text") or ""
+        )
+
+        score = citation.get("score")
+        try:
+            score = float(score) if score is not None else 0.0
+        except Exception:
+            score = 0.0
+
+        web_citations.append(
+            {
+                "title": citation.get("title") or domain or "Nguồn web",
+                "url": url,
+                "snippet": snippet,
+                "type": "web",
+                "score": score,
+                "domain": domain,
+                "favicon": citation.get("favicon")
+                or citation.get("favicon_url")
+                or (f"https://www.google.com/s2/favicons?domain={domain}&sz=64" if domain else ""),
+            }
+        )
+    return web_citations
+
+
+def _sanitize_assistant_metadata(
+    metadata: dict[str, Any] | None,
+    web_search_enabled: bool | None = None,
+) -> dict[str, Any]:
+    raw = metadata if isinstance(metadata, dict) else {}
+    route = str(raw.get("route") or "medical")
+    enabled = (
+        bool(web_search_enabled)
+        if web_search_enabled is not None
+        else bool(raw.get("web_search_enabled", False))
+    )
+    used = bool(raw.get("web_search_used", False))
+
+    if not enabled or not used:
+        return {
+            "route": route,
+            "web_search_enabled": enabled,
+            "web_search_used": False,
+        }
+
+    web_citations = _normalize_web_citations(raw.get("citations"))
+    if not web_citations:
+        return {
+            "route": route,
+            "web_search_enabled": enabled,
+            "web_search_used": False,
+        }
+
+    return {
+        "route": route,
+        "web_search_enabled": enabled,
+        "web_search_used": True,
+        "citations": web_citations,
+    }
 
 
 # ────────────────────────────────────────────────────────────
@@ -135,7 +234,25 @@ def list_messages(
         .limit(limit)
         .all()
     )
-    return messages
+
+    sanitized_messages: list[MessageResponse] = []
+    for msg in messages:
+        metadata = msg.metadata_
+        if msg.role == "assistant":
+            metadata = _sanitize_assistant_metadata(metadata)
+
+        sanitized_messages.append(
+            MessageResponse(
+                id=msg.id,
+                thread_id=msg.thread_id,
+                role=msg.role,
+                content=msg.content,
+                metadata_=metadata,
+                created_at=msg.created_at,
+            )
+        )
+
+    return sanitized_messages
 
 
 @router.post(
@@ -227,14 +344,21 @@ def ask(
         }
 
     # Persist assistant reply with full RAG metadata
+    assistant_metadata = _sanitize_assistant_metadata(
+        {
+            "citations": result.get("citations", []),
+            "route": result.get("route", "medical"),
+            "web_search_enabled": bool(body.web_search_enabled),
+            "web_search_used": bool(result.get("web_search_used", False)),
+        },
+        web_search_enabled=bool(body.web_search_enabled),
+    )
+
     assistant_msg = Message(
         thread_id=thread.id,
         role="assistant",
         content=result["answer"],
-        metadata_={
-            "citations": result["citations"],
-            "route": result["route"],
-        },
+        metadata_=assistant_metadata,
     )
     db.add(assistant_msg)
 
@@ -245,15 +369,16 @@ def ask(
 
     db.commit()
     db.refresh(assistant_msg)
+    public_citations = assistant_metadata.get("citations", [])
     logger.info(
         f"[ASK] Assistant message saved: {assistant_msg.id} "
-        f"(route={result['route']}, citations={len(result['citations'])})"
+        f"(route={result['route']}, citations={len(public_citations)})"
     )
 
     return AskResponse(
         user_message=MessageResponse.model_validate(user_msg),
         assistant_message=MessageResponse.model_validate(assistant_msg),
-        citations=[Citation(**c) for c in result["citations"]],
+        citations=[Citation(**c) for c in public_citations],
         route=result["route"],
     )
 
