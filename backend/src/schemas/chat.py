@@ -68,6 +68,8 @@ class Citation(BaseModel):
     snippet: str = ""
     source: str = ""
     url: str = ""
+    domain: str = ""
+    favicon: str = ""
     type: str = "rag"
     score: float = 0.0
 
@@ -85,5 +87,5 @@ class AskResponse(BaseModel):
     """
     user_message: MessageResponse
     assistant_message: MessageResponse
-    citations: list[Citation] = []
+    citations: list[Citation] = Field(default_factory=list)
     route: str = "medical"  # medical | general | blocked | error
