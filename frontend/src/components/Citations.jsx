@@ -1,4 +1,4 @@
-import { ExternalLink, FileText } from "lucide-react";
+import { ExternalLink, Globe, Link2 } from "lucide-react";
 
 function isValidUrl(url) {
   if (!url) return false;
@@ -22,26 +22,25 @@ function extractDomain(url) {
 function normalizeCitation(citation = {}) {
   const sourceAsUrl = isValidUrl(citation.source) ? citation.source : "";
   const url = citation.url || citation.link || sourceAsUrl || "";
+  const domain = citation.domain || extractDomain(url);
   return {
-    title: citation.title || citation.document_name || "Tài liệu tham khảo",
+    title: citation.title || citation.document_name || domain || "Nguồn web",
     snippet: citation.snippet || citation.content || citation.text || "",
     url,
-    type: (citation.type || (url ? "web" : "rag")).toLowerCase(),
+    type: "web",
     score: typeof citation.score === "number" ? citation.score : null,
+    domain,
+    favicon: citation.favicon || citation.favicon_url || (domain ? `https://www.google.com/s2/favicons?domain=${domain}&sz=64` : ""),
   };
 }
 
-function CitationBadge({ type }) {
-  const isWeb = type === "web";
+function CitationBadge() {
   return (
     <span
-      className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-semibold ${
-        isWeb
-          ? "bg-orange-100 text-orange-700 dark:bg-orange-900/30 dark:text-orange-300"
-          : "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300"
-      }`}
+      className="inline-flex items-center gap-1 rounded-full bg-sky-100 px-2 py-0.5 text-[10px] font-semibold text-sky-700 dark:bg-sky-900/30 dark:text-sky-300"
     >
-      {isWeb ? "Web" : "RAG"}
+      <Globe className="h-3 w-3" />
+      Nguồn web công khai
     </span>
   );
 }
@@ -61,18 +60,21 @@ function CitationPreview({ citation }) {
 export default function Citations({ citations = [], citationPrefix = "citation", onSelectCitation }) {
   if (!citations.length) return null;
 
-  const normalized = citations.map(normalizeCitation);
+  const normalized = citations
+    .map(normalizeCitation)
+    .filter((citation) => citation.type === "web" && isValidUrl(citation.url));
+
+  if (!normalized.length) return null;
 
   return (
-    <div className="mt-4 rounded-xl border border-blue-100 bg-blue-50/60 p-3 dark:border-blue-900/50 dark:bg-blue-900/10">
-      <p className="mb-3 flex items-center gap-2 text-xs font-semibold text-blue-700 dark:text-blue-300">
-        <FileText className="h-3.5 w-3.5" />
+    <div className="mt-4 rounded-xl border border-sky-100 bg-sky-50/60 p-3 dark:border-sky-900/50 dark:bg-sky-900/10">
+      <p className="mb-3 flex items-center gap-2 text-xs font-semibold text-sky-700 dark:text-sky-300">
+        <Globe className="h-3.5 w-3.5" />
         Nguồn tham khảo
       </p>
 
       <div className="space-y-2">
         {normalized.map((citation, i) => {
-          const domain = extractDomain(citation.url);
           const index = i + 1;
 
           return (
@@ -87,14 +89,14 @@ export default function Citations({ citations = [], citationPrefix = "citation",
                 <button
                   type="button"
                   onClick={() => onSelectCitation?.(index)}
-                  className="mt-0.5 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-blue-100 text-xs font-bold text-blue-700 transition-colors hover:bg-blue-200 dark:bg-blue-900/40 dark:text-blue-300"
+                  className="mt-0.5 inline-flex h-6 w-6 flex-shrink-0 items-center justify-center rounded-md bg-sky-100 text-xs font-bold text-sky-700 transition-colors hover:bg-sky-200 dark:bg-sky-900/40 dark:text-sky-300"
                 >
                   {index}
                 </button>
 
                 <div className="min-w-0 flex-1">
                   <div className="mb-1 flex items-center gap-2">
-                    <CitationBadge type={citation.type} />
+                    <CitationBadge />
                     {citation.score !== null && citation.score > 0 && (
                       <span className="text-[10px] text-gray-500 dark:text-gray-400">
                         score {(citation.score * 100).toFixed(0)}%
@@ -109,6 +111,16 @@ export default function Citations({ citations = [], citationPrefix = "citation",
                       rel="noopener noreferrer"
                       className="inline-flex items-center gap-1 font-semibold text-gray-900 hover:text-primary-600 dark:text-gray-100 dark:hover:text-primary-400"
                     >
+                      {citation.favicon ? (
+                        <img
+                          src={citation.favicon}
+                          alt="favicon"
+                          className="h-4 w-4 flex-shrink-0 rounded-sm"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <Link2 className="h-3.5 w-3.5 flex-shrink-0" />
+                      )}
                       <span className="line-clamp-1">{citation.title}</span>
                       <ExternalLink className="h-3.5 w-3.5 flex-shrink-0" />
                     </a>
@@ -116,8 +128,10 @@ export default function Citations({ citations = [], citationPrefix = "citation",
                     <p className="font-semibold text-gray-900 dark:text-gray-100">{citation.title}</p>
                   )}
 
-                  {domain && (
-                    <p className="mt-0.5 text-xs text-gray-500 dark:text-gray-400">{domain}</p>
+                  {citation.url && (
+                    <p className="mt-0.5 truncate text-xs text-gray-500 dark:text-gray-400">
+                      {citation.url}
+                    </p>
                   )}
 
                   {citation.snippet && (
