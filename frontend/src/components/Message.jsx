@@ -52,7 +52,8 @@ export default function Message({ message, onRegenerate }) {
   const utteranceRef = useRef(null);
   const citationPrefix = `citation-${message.id}`;
 
-  const rawCitations = message?.metadata_?.citations || [];
+  const metadata = message?.metadata_ || {};
+  const rawCitations = Array.isArray(metadata?.citations) ? metadata.citations : [];
   const normalizedCitations = rawCitations.map((citation = {}) => {
     const sourceAsUrl =
       typeof citation.source === "string" && /^https?:\/\//.test(citation.source)
@@ -64,8 +65,16 @@ export default function Message({ message, onRegenerate }) {
       snippet: citation.snippet || citation.content || citation.text || "",
       type: (citation.type || (citation.url ? "web" : "rag")).toLowerCase(),
       score: typeof citation.score === "number" ? citation.score : null,
+      domain: citation.domain || "",
+      favicon: citation.favicon || citation.favicon_url || "",
     };
-  });
+  }).filter((citation) => citation.type === "web" && /^https?:\/\//.test(citation.url));
+
+  const shouldShowReferences =
+    !isUser
+    && Boolean(metadata?.web_search_enabled)
+    && Boolean(metadata?.web_search_used)
+    && normalizedCitations.length > 0;
 
   const scrollToCitation = (index) => {
     const id = `${citationPrefix}-${index}`;
@@ -264,18 +273,12 @@ export default function Message({ message, onRegenerate }) {
         )}
 
         {/* Citations */}
-        {!isUser && normalizedCitations.length > 0 && (
+        {shouldShowReferences && (
           <Citations
             citations={normalizedCitations}
             citationPrefix={citationPrefix}
             onSelectCitation={scrollToCitation}
           />
-        )}
-
-        {!isUser && message.metadata_ && normalizedCitations.length === 0 && (
-          <p className="mt-3 text-xs text-gray-500 dark:text-gray-400">
-            Không có tài liệu tham khảo cho câu trả lời này.
-          </p>
         )}
 
         {/* Action buttons (assistant only) */}
