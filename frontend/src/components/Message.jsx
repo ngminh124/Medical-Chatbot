@@ -76,6 +76,12 @@ export default function Message({ message, onRegenerate }) {
     && Boolean(metadata?.web_search_used)
     && normalizedCitations.length > 0;
 
+  const assistantContent = !isUser
+    ? (shouldShowReferences
+      ? (message.content || "")
+      : (message.content || "").replace(/\s*\[\d+\]/g, ""))
+    : (message.content || "");
+
   const scrollToCitation = (index) => {
     const id = `${citationPrefix}-${index}`;
     const el = document.getElementById(id);
@@ -111,6 +117,10 @@ export default function Message({ message, onRegenerate }) {
   };
 
   const replaceCitationRefs = (node) => {
+    if (!shouldShowReferences) {
+      return node;
+    }
+
     if (typeof node === "string") {
       const parts = node.split(/(\[\d+\])/g);
       return parts.map((part, idx) => {
@@ -164,7 +174,8 @@ export default function Message({ message, onRegenerate }) {
       return;
     }
 
-    const textToSpeak = normalizeForSpeech(message.content);
+    const textSource = isUser ? message.content : assistantContent;
+    const textToSpeak = normalizeForSpeech(textSource);
     if (!textToSpeak) return;
 
     window.speechSynthesis.cancel();
@@ -191,7 +202,7 @@ export default function Message({ message, onRegenerate }) {
 
   const handleCopy = async () => {
     try {
-      await navigator.clipboard.writeText(message.content);
+      await navigator.clipboard.writeText(assistantContent);
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     } catch {
@@ -229,18 +240,16 @@ export default function Message({ message, onRegenerate }) {
         isUser ? "flex-row-reverse justify-start" : "justify-start"
       }`}
     >
-      {/* Avatar */}
       <div
         className={`flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl ${
           isUser
-            ? "bg-primary-100 dark:bg-primary-900/30 text-primary-600 dark:text-primary-400"
-            : "bg-emerald-100 dark:bg-emerald-900/30 text-emerald-600 dark:text-emerald-400"
+            ? "bg-primary-100 text-primary-600 dark:bg-primary-900/30 dark:text-primary-400"
+            : "bg-emerald-100 text-emerald-600 dark:bg-emerald-900/30 dark:text-emerald-400"
         }`}
       >
         {isUser ? <User className="h-6 w-6" /> : <Bot className="h-6 w-6" />}
       </div>
 
-      {/* Content */}
       <div
         className={`min-w-0 max-w-[88%] rounded-2xl px-4 py-3 sm:max-w-[82%] sm:px-5 sm:py-4 ${
           isUser
@@ -253,11 +262,11 @@ export default function Message({ message, onRegenerate }) {
         </p>
 
         {isUser ? (
-          <p className="text-base md:text-lg leading-relaxed text-gray-800 dark:text-gray-200 whitespace-pre-wrap">
-            {message.content}
+          <p className="whitespace-pre-wrap text-base leading-relaxed text-gray-800 dark:text-gray-200 md:text-lg">
+            {assistantContent}
           </p>
         ) : (
-          <div className="prose prose-base md:prose-lg dark:prose-invert max-w-none text-gray-800 dark:text-gray-200">
+          <div className="prose prose-base max-w-none text-gray-800 dark:prose-invert dark:text-gray-200 md:prose-lg">
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               components={{
@@ -267,12 +276,11 @@ export default function Message({ message, onRegenerate }) {
                 td: ({ children }) => <td><MarkdownBlock>{children}</MarkdownBlock></td>,
               }}
             >
-              {message.content}
+              {assistantContent}
             </ReactMarkdown>
           </div>
         )}
 
-        {/* Citations */}
         {shouldShowReferences && (
           <Citations
             citations={normalizedCitations}
@@ -281,71 +289,62 @@ export default function Message({ message, onRegenerate }) {
           />
         )}
 
-        {/* Action buttons (assistant only) */}
         {!isUser && (
           <div className="mt-3 flex items-center gap-1.5">
-            {/* Speak */}
             <button
               onClick={handleSpeak}
               disabled={!speechSupported}
               className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 isSpeaking
                   ? "bg-primary-100 text-primary-600 dark:bg-primary-900/30 dark:text-primary-300"
-                  : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-primary-600 dark:hover:text-primary-300"
+                  : "text-gray-400 hover:bg-gray-100 hover:text-primary-600 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-primary-300"
               } disabled:cursor-not-allowed disabled:opacity-40`}
               title={isSpeaking ? "Dừng đọc" : "Đọc nội dung"}
             >
               {isSpeaking ? <Square className="h-5 w-5" /> : <Volume2 className="h-5 w-5" />}
             </button>
 
-            {/* Copy */}
             <button
               onClick={handleCopy}
-              className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
+              className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-gray-300"
               title="Sao chép"
             >
-              {copied
-                ? <Check className="h-5 w-5 text-green-500" />
-                : <Copy className="h-5 w-5" />}
+              {copied ? <Check className="h-5 w-5 text-green-500" /> : <Copy className="h-5 w-5" />}
             </button>
 
-            {/* Regenerate */}
             {onRegenerate && (
               <button
                 onClick={handleRegenerate}
                 disabled={regenerating}
-                className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 dark:text-gray-500 transition-colors hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300 disabled:opacity-40"
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-600 disabled:opacity-40 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-gray-300"
                 title="Tạo lại"
               >
                 <RefreshCw className={`h-5 w-5 ${regenerating ? "animate-spin" : ""}`} />
               </button>
             )}
 
-            {/* Divider */}
             <span className="mx-1 h-5 w-px bg-gray-200 dark:bg-gray-700" />
 
-            {/* Thumbs up */}
             <button
               onClick={() => handleFeedback("up")}
               disabled={!!feedbackGiven}
               className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 feedbackGiven === "up"
                   ? "text-green-500"
-                  : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
+                  : "text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-gray-300"
               } disabled:cursor-default`}
               title="Hữu ích"
             >
               <ThumbsUp className="h-5 w-5" />
             </button>
 
-            {/* Thumbs down */}
             <button
               onClick={() => handleFeedback("down")}
               disabled={!!feedbackGiven}
               className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
                 feedbackGiven === "down"
                   ? "text-red-500"
-                  : "text-gray-400 dark:text-gray-500 hover:bg-gray-100 dark:hover:bg-gray-700 hover:text-gray-600 dark:hover:text-gray-300"
+                  : "text-gray-400 hover:bg-gray-100 hover:text-gray-600 dark:text-gray-500 dark:hover:bg-gray-700 dark:hover:text-gray-300"
               } disabled:cursor-default`}
               title="Chưa hữu ích"
             >
