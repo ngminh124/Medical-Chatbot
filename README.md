@@ -1,193 +1,126 @@
-# Vietnamese Medical Chatbot - RAG System
+# Vietnamese Medical Chatbot
 
-Hệ thống RAG (Retrieval-Augmented Generation) y tế tiếng Việt sử dụng Qdrant vector database và embedding models.
+Hệ thống chatbot y tế tiếng Việt theo kiến trúc RAG, gồm:
+- Backend FastAPI (RAG, auth, chat, STT/TTS, metrics)
+- Frontend React + Vite
+- PostgreSQL cho dữ liệu hội thoại/người dùng
+- Qdrant + Elasticsearch cho truy xuất tri thức
 
-## 📁 Cấu trúc thư mục
+## Kiến trúc tổng quan
+
+```
+Client (React)
+    ↓ HTTP
+Backend API (FastAPI)
+    ├── Auth + Chat threads/messages (PostgreSQL)
+    ├── RAG pipeline
+    │   ├── Dense search (Qdrant)
+    │   └── Lexical search (Elasticsearch)
+    ├── STT/TTS proxy services
+    └── Metrics (/metrics) + health checks
+```
+
+## Cấu trúc dự án
 
 ```
 Vietnamese-Medical-Chatbot/
 ├── backend/
+│   ├── main.py                    # FastAPI app entrypoint
 │   ├── src/
-│   │   ├── configs/          # Cấu hình hệ thống
-│   │   │   ├── setup.py      # Pydantic settings
-│   │   │   └── __init__.py
-│   │   ├── core/             # Core logic
-│   │   │   └── vectorize.py  # Qdrant operations
-│   │   └── services/         # Business logic
-│   │       ├── embedding.py  # Embedding service
-│   │       └── chunking.py   # Document chunking
-│   └── scripts/              # Legacy scripts (deprecated)
-├── scripts/                  # Utility scripts (NEW)
-│   └── ingest_jsonl_to_qdrant.py  # Data ingestion
-├── data/
-│   ├── chunks/               # Processed chunks
-│   │   └── medical_master_data.jsonl
-│   ├── output/               # Markdown outputs
-│   └── processed/            # Processed data
-├── .env                      # Environment variables
-├── docker-compose.yml        # Docker services
-├── requirements.txt          # Python dependencies
-└── README.md                 # This file
+│   │   ├── configs/               # Pydantic settings
+│   │   ├── core/                  # Core RAG/search/cache/metrics
+│   │   ├── routers/               # API routers (auth, chat, rag, stt, tts...)
+│   │   ├── services/              # Embedding, rerank, TTS, STT, brain
+│   │   ├── schemas/               # Request/response schemas
+│   │   └── database.py            # Database helpers
+│   ├── models/                    # SQLAlchemy models
+│   ├── scripts/                   # Scripts nội bộ backend
+│   └── tests/                     # Test backend
+├── frontend/
+│   ├── src/
+│   │   ├── api/                   # Axios/fetch client modules
+│   │   ├── components/            # UI components
+│   │   ├── pages/                 # App pages
+│   │   └── contexts/hooks/        # State management
+│   └── Dockerfile
+├── database/
+│   ├── docker-compose.yml         # PostgreSQL service
+│   └── init.sql                   # Database init script
+├── data/                          # Dữ liệu raw/processed/chunks/vector_db...
+├── qdrant_data/                   # Qdrant persistent storage (local)
+├── rehierarchy_output/            # Dữ liệu output xử lý lại tài liệu
+├── scripts/                       # Scripts tiện ích cấp project
+├── temp/                          # File tạm
+├── requirements.txt
+├── .env.example
+└── README.md
 ```
 
-## 🚀 Bắt đầu nhanh
+## Yêu cầu môi trường
 
-### 1. Cài đặt dependencies
+- Python 3.10+
+- Node.js 18+
+- Docker + Docker Compose
+
+## Thiết lập nhanh
+
+### 1) Cài đặt backend
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 2. Cấu hình môi trường
-
-File `.env` đã được cấu hình sẵn với:
-- Qdrant: localhost:6333
-- Embedding Model: intfloat/multilingual-e5-large (1024-dim)
-- Device: CUDA (GPU)
-
-### 3. Khởi động Qdrant
+### 2) Tạo file môi trường
 
 ```bash
-docker-compose up -d
+cp .env.example .env
 ```
 
-### 4. Nạp dữ liệu vào Qdrant
+Sau đó cập nhật giá trị thật cho các biến API key và cấu hình host/port nếu cần.
+
+### 3) Khởi động hạ tầng dữ liệu
 
 ```bash
-python scripts/ingest_jsonl_to_qdrant.py
+docker compose -f backend/docker-compose.yml up -d
+docker compose -f database/docker-compose.yml up -d
 ```
 
-## 📊 Chi tiết Scripts
-
-### scripts/ingest_jsonl_to_qdrant.py
-
-Script nạp 40,000+ chunks dữ liệu y tế từ JSONL vào Qdrant.
-
-**Tính năng:**
-- ✅ Đọc JSONL streaming (tránh tràn RAM)
-- ✅ Batch embedding (64 chunks/batch)
-- ✅ Batch upsert (500 points/batch)
-- ✅ GPU acceleration (CUDA)
-- ✅ Progress tracking (loguru + tqdm)
-- ✅ Error handling robust
-
-**Sử dụng:**
-```bash
-python scripts/ingest_jsonl_to_qdrant.py
-```
-
-## 🔧 Cấu hình
-
-### Environment Variables (.env)
+### 4) Chạy backend
 
 ```bash
-# Qdrant Configuration
-QDRANT_HOST=localhost
-QDRANT_PORT=6333
-DEFAULT_COLLECTION_NAME=medical_data
-
-# Embedding Model (1024-dim)
-EMBEDDING_MODEL_NAME=intfloat/multilingual-e5-large
-VECTOR_DIMENSION=1024
-
-# Device
-DEVICE=cuda  # cuda, cpu, hoặc mps
+uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-## 📦 Dependencies
+### 5) Chạy frontend
 
-- `loguru` - Logging
-- `qdrant-client` - Vector database client
-- `pydantic-settings` - Configuration management
-- `sentence-transformers` - Embedding models
-- `torch` - Deep learning framework
-- `tqdm` - Progress bars
-
-## 🏗️ Architecture
-
-### Data Flow: Ingestion
-
-```
-JSONL File (40k chunks)
-    ↓
-Read in batches (64)
-    ↓
-Create embeddings (GPU)
-    ↓
-Buffer points (500)
-    ↓
-Upsert to Qdrant
-```
-
-### Module Dependencies
-
-```
-scripts/ingest_jsonl_to_qdrant.py
-    ├── backend.src.configs.setup (Settings)
-    ├── backend.src.core.vectorize (Qdrant ops)
-    └── backend.src.services.embedding (Embedding service)
-```
-
-## 📝 Data Format
-
-### Input: JSONL Format
-
-```json
-{
-  "id": "QTKT_chinh_hinh_0001",
-  "content": "Nội dung y tế...",
-  "metadata": {
-    "source_file": "/path/to/file.md",
-    "file_name": "QTKT_chinh_hinh",
-    "heading_hierarchy": ["Title", "Section"],
-    "chunk_index": 1
-  }
-}
-```
-
-### Output: Qdrant Points
-
-```python
-{
-  "id": "QTKT_chinh_hinh_0001",  # Giữ nguyên từ JSONL
-  "vector": [0.1, 0.2, ...],     # 1024-dim embedding
-  "payload": {
-    "content": "Nội dung y tế...", # Để retrieve
-    "source_file": "...",          # Metadata fields
-    "file_name": "...",
-    "heading_hierarchy": [...],
-    "chunk_index": 1
-  }
-}
-```
-
-## 🎯 Performance
-
-- **GPU**: NVIDIA RTX 4090
-- **Throughput**: ~110 chunks/second
-- **Total time**: ~5-6 phút cho 35,941 chunks
-- **Memory**: Streaming processing (low RAM usage)
-
-## 🔍 Troubleshooting
-
-### CUDA Out of Memory
-
-Giảm `embedding_batch_size`:
-```python
-ingestion = JSONLIngestion(
-    jsonl_path=jsonl_path,
-    embedding_batch_size=32,  # Giảm từ 64
-)
-```
-
-### Qdrant Connection Error
-
-Kiểm tra Qdrant đang chạy:
 ```bash
-docker ps | grep qdrant
-curl http://localhost:6333/collections
+cd frontend
+npm install
+npm run dev
 ```
 
-## 📄 License
+Frontend mặc định chạy ở `http://localhost:5173` (dev) hoặc `http://localhost:3000` (docker).
 
-MIT License
+## Biến môi trường chính
+
+- Hệ thống vector/search: `QDRANT_HOST`, `QDRANT_PORT`, `ELASTICSEARCH_HOST`, `ELASTICSEARCH_PORT`
+- Embedding/RAG: `EMBEDDING_MODEL_NAME`, `VECTOR_DIMENSION`, `TOP_K`
+- Generation providers: `VLLM_URL`, `OLLAMA_URL`, `MODEL_NAME`
+- Auth: `JWT_SECRET_KEY`
+- Database: `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`
+- Audio: `ELEVENLABS_API_KEY`, `ELEVENLABS_VOICE_ID`, `STT_GPU_SERVICE_URL`
+
+## API nổi bật
+
+- `GET /` — thông tin service
+- `GET /docs` — Swagger UI
+- `GET /metrics` — Prometheus metrics
+- `GET /v1/health/*` — health checks
+- `POST /v1/auth/register`, `POST /v1/auth/login`
+- `POST /v1/chat/threads/:id/ask` và `.../ask-stream`
+- `POST /v1/stt/transcribe`, `POST /v1/tts/synthesize`
+
+## Ghi chú
+
+- Các thư mục dữ liệu lớn và output nội bộ (`qdrant_data`, `rehierarchy_output`, `temp`, ...) đã được cấu hình bỏ qua khỏi git.
+- Không commit file `.env` thật lên repository.
