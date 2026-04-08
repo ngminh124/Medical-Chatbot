@@ -148,6 +148,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
   const [error, setError]                 = useState(null);
   const [isDictating, setIsDictating]     = useState(false);
   const [speechSupported, setSpeechSupported] = useState(true);
+  const [isWaitingFirstChunk, setIsWaitingFirstChunk] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [activeQuestionId, setActiveQuestionId] = useState(null);
   const [desktopNavigatorOpen, setDesktopNavigatorOpen] = useState(false);
@@ -182,6 +183,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
 
     // Optimistic user message
     const tempId = "temp-" + Date.now();
+    const tempStreamId = `temp-streaming-${Date.now()}`;
     const tempUserMsg = {
       id: tempId,
       thread_id: currentThreadId,
@@ -189,50 +191,156 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       content,
       created_at: new Date().toISOString(),
     };
-    setMessages((prev) => [...prev, tempUserMsg]);
+    const tempAssistantMsg = {
+      id: tempStreamId,
+      thread_id: currentThreadId,
+      role: "assistant",
+      content: "",
+      created_at: new Date().toISOString(),
+      metadata_: { is_streaming: true },
+    };
+
+    setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
     if (!contentOverride) setInput("");
+    setIsWaitingFirstChunk(true);
+
+    let hasReceivedChunk = false;
+    let streamedText = "";
 
     try {
-      // ── Call /ask — one round-trip for user msg + RAG generation ──────────
-      const res = await chatAPI.ask(currentThreadId, content, {
-        web_search_enabled: webSearchEnabled,
-      }, { signal });
-      const { user_message, assistant_message } = res.data;
+      let streamFinal = null;
+      let shouldFallbackToNonStream = false;
 
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempId),
-        user_message,
-        assistant_message,
-      ]);
-    } catch (err) {
-      // Remove optimistic message on failure and restore input
-      setMessages((prev) => prev.filter((m) => m.id !== tempId));
-      if (!contentOverride) setInput(content);
+      try {
+        streamFinal = await chatAPI.askStream(
+          currentThreadId,
+          content,
+          { web_search_enabled: webSearchEnabled },
+          {
+            signal,
+            onChunk: (_chunk, fullText) => {
+              streamedText = fullText;
+              if (!hasReceivedChunk) {
+                hasReceivedChunk = true;
+                setIsWaitingFirstChunk(false);
+              }
 
-      if (signal?.aborted || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
+              setMessages((prev) =>
+                prev.map((m) =>
+                  m.id === tempStreamId
+                    ? { ...m, content: fullText, metadata_: { ...(m.metadata_ || {}), is_streaming: true } }
+                    : m
+                )
+              );
+            },
+          }
+        );
+      } catch (streamErr) {
+        if (streamErr?.status === 404) {
+          shouldFallbackToNonStream = true;
+        } else {
+          throw streamErr;
+        }
+      }
+
+      if (shouldFallbackToNonStream) {
+        const res = await chatAPI.ask(
+          currentThreadId,
+          content,
+          { web_search_enabled: webSearchEnabled },
+          { signal }
+        );
+        const { user_message, assistant_message } = res.data;
+
+        setMessages((prev) => [
+          ...prev.filter((m) => m.id !== tempId && m.id !== tempStreamId),
+          user_message,
+          assistant_message,
+        ]);
         return;
       }
 
-      const status = err?.response?.status;
+      const finalUserMessage = streamFinal?.user_message || tempUserMsg;
+      const finalAssistantMessage = streamFinal?.assistant_message || {
+        ...tempAssistantMsg,
+        id: `asst-${Date.now()}`,
+        content: streamFinal?.assistant_text ?? streamedText,
+        metadata_: {
+          ...(tempAssistantMsg.metadata_ || {}),
+          is_streaming: false,
+        },
+      };
+
+      setMessages((prev) => [
+        ...prev.filter((m) => m.id !== tempId && m.id !== tempStreamId),
+        finalUserMessage,
+        finalAssistantMessage,
+      ]);
+    } catch (err) {
+      if (signal?.aborted || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
+        setMessages((prev) =>
+          prev
+            .map((m) => {
+              if (m.id !== tempStreamId) return m;
+              if (!streamedText.trim()) return null;
+              return {
+                ...m,
+                id: `asst-aborted-${Date.now()}`,
+                content: streamedText,
+                metadata_: { ...(m.metadata_ || {}), is_streaming: false, is_aborted: true },
+              };
+            })
+            .filter(Boolean)
+        );
+        return;
+      }
+
+      const hasPartialContent = Boolean(streamedText.trim());
+      setMessages((prev) =>
+        prev
+          .filter((m) => m.id !== tempId)
+          .map((m) => {
+            if (m.id !== tempStreamId) return m;
+            if (!hasPartialContent) return null;
+            return {
+              ...m,
+              id: `asst-partial-${Date.now()}`,
+              content: streamedText,
+              metadata_: {
+                ...(m.metadata_ || {}),
+                is_streaming: false,
+                is_partial: true,
+              },
+            };
+          })
+          .filter(Boolean)
+      );
+      if (!contentOverride && !hasPartialContent) setInput(content);
+
+      const status = err?.response?.status ?? err?.status;
       if (status === 503) {
         setError("Dịch vụ AI đang không khả dụng. Vui lòng thử lại sau.");
       } else if (status === 408 || err?.code === "ECONNABORTED") {
         setError("Yêu cầu mất quá nhiều thời gian. Vui lòng thử câu hỏi ngắn hơn.");
+      } else if (hasPartialContent) {
+        setError("Kết nối bị gián đoạn. Minqes đã hiển thị phần phản hồi nhận được.");
       } else {
         setError("Đã có lỗi xảy ra khi xử lý yêu cầu. Vui lòng thử lại.");
       }
+    } finally {
+      setIsWaitingFirstChunk(false);
     }
   }, [input, threadId, onThreadCreated, webSearchEnabled]);
 
   const {
     isSending,
-    sendMessage,
+    sendMessageStream,
     stopSending,
   } = useSendMessage(performSend);
 
   const handleSend = useCallback((contentOverride) => {
-    sendMessage(contentOverride);
-  }, [sendMessage]);
+    sendMessageStream(contentOverride);
+  }, [sendMessageStream]);
 
   const handleToggleDictation = useCallback(() => {
     const recognition = speechRecognitionRef.current;
@@ -577,6 +685,9 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         >
           <div className="mx-auto flex w-full max-w-6xl flex-col gap-8 sm:gap-10">
           {messages.map((msg) => (
+            (!msg.content?.trim() && msg.role === "assistant" && String(msg.id).startsWith("temp-streaming-"))
+              ? null
+              : (
             <div
               key={msg.id}
               ref={(el) => {
@@ -592,10 +703,11 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
                 onRegenerate={msg.role === "assistant" ? handleRegenerate : undefined}
               />
             </div>
+              )
           ))}
 
           {/* Typing indicator while waiting for response */}
-          {isSending && <TypingIndicator />}
+          {isSending && isWaitingFirstChunk && <TypingIndicator />}
 
           <div ref={messagesEndRef} />
           </div>
