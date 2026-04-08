@@ -1,7 +1,8 @@
+import json
 import logging
 import os
 import re
-from typing import Dict, List, Optional
+from typing import Dict, Iterator, List, Optional
 
 import httpx
 import openai
@@ -73,6 +74,42 @@ def qwen3_chat_complete(
         logger.warning(f"[GEN] vLLM failed: {error_msg}")
 
     return None
+
+
+def qwen3_chat_stream(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: Optional[float] = None,
+    max_tokens: Optional[int] = None,
+) -> Iterator[str]:
+    """Stream chat completion tokens from remote vLLM (OpenAI-compatible)."""
+    temperature = temperature if temperature is not None else 0.7
+    max_tokens = max_tokens if max_tokens is not None else 2048
+
+    if model is None:
+        model = get_generation_model()
+
+    client = get_vllm_client()
+    if not client:
+        return
+
+    stream = client.chat.completions.create(
+        model=model,
+        messages=messages,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        top_p=0.8,
+        stream=True,
+    )
+
+    for chunk in stream:
+        token = ""
+        try:
+            token = chunk.choices[0].delta.content or ""
+        except Exception:
+            token = ""
+        if token:
+            yield token
 
 
 def check_vllm_health() -> bool:
@@ -211,6 +248,61 @@ def ollama_chat_complete(
         return None
 
 
+def ollama_chat_stream(
+    messages: List[Dict[str, str]],
+    model: Optional[str] = None,
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+) -> Iterator[str]:
+    """Stream chat completion chunks via Ollama /api/chat."""
+    ollama_url = os.getenv("OLLAMA_URL", _DEFAULT_OLLAMA_URL)
+    ollama_think = os.getenv("OLLAMA_THINK", "false").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if model is None:
+        model = _resolve_ollama_model(ollama_url)
+
+    if not model:
+        return
+
+    payload = {
+        "model": model,
+        "messages": messages,
+        "stream": True,
+        "think": ollama_think,
+        "options": {
+            "temperature": temperature,
+            "num_predict": max_tokens,
+        },
+    }
+
+    with httpx.stream(
+        "POST",
+        f"{ollama_url}/api/chat",
+        json=payload,
+        timeout=300.0,
+    ) as response:
+        response.raise_for_status()
+        for line in response.iter_lines():
+            if not line:
+                continue
+
+            try:
+                item = json.loads(line)
+            except Exception:
+                continue
+
+            token = ((item or {}).get("message") or {}).get("content") or ""
+            if token:
+                yield token
+
+            if bool(item.get("done", False)):
+                break
+
+
 def get_response(
     messages: List[Dict[str, str]],
     temperature: float = 0.7,
@@ -317,6 +409,48 @@ def get_response(
         logger.error("[GET_RESPONSE] Both vLLM and Ollama failed")
 
     return result
+
+
+def get_response_stream(
+    messages: List[Dict[str, str]],
+    temperature: float = 0.7,
+    max_tokens: int = 2048,
+) -> Iterator[str]:
+    """Unified streaming generation with vLLM → Ollama fallback."""
+    emitted_any = False
+
+    # 1) vLLM stream first
+    try:
+        for token in qwen3_chat_stream(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            emitted_any = True
+            yield token
+        if emitted_any:
+            return
+    except Exception as e:
+        logger.warning(f"[GEN] vLLM stream failed: {e}")
+        if emitted_any:
+            return
+
+    # 2) fallback Ollama stream
+    try:
+        for token in ollama_chat_stream(
+            messages=messages,
+            temperature=temperature,
+            max_tokens=max_tokens,
+        ):
+            emitted_any = True
+            yield token
+        if emitted_any:
+            return
+    except Exception as e:
+        logger.error(f"[GEN] Ollama stream failed: {e}")
+
+    if not emitted_any:
+        yield "Xin lỗi, hệ thống tạo phản hồi đang gặp sự cố. Vui lòng thử lại sau vài giây."
 
 
 def get_openai_client():
