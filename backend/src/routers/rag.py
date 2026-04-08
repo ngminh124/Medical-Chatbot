@@ -1,7 +1,7 @@
 """RAG pipeline — retrieval-augmented generation for Minqes."""
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, Iterator, List
 
 from fastapi import APIRouter, Depends
 from loguru import logger
@@ -23,7 +23,9 @@ MEDICAL_SYSTEM_PROMPT = (
     "tài liệu y khoa được cung cấp.\n\n"
     "Nguyên tắc:\n"
     "• Luôn trả lời bằng tiếng Việt, rõ ràng và chính xác.\n"
-    "• Dựa chủ yếu vào tài liệu tham khảo; trích dẫn bằng [1], [2], ...\n"
+    "• Dựa chủ yếu vào tài liệu tham khảo khi có.\n"
+    "• CHỈ khi bật web search và có nguồn web, mới được dùng số trích dẫn [1], [2], ...\n"
+    "• Nếu web search tắt, TUYỆT ĐỐI không chèn [1], [2] hay mục 'Nguồn tham khảo'.\n"
     "• Khi không có thông tin trong tài liệu, nói rõ giới hạn kiến thức.\n"
     "• Luôn khuyến khích tham khảo bác sĩ cho các tình huống nghiêm trọng.\n"
     "• Không đưa ra chẩn đoán bệnh cụ thể hay kê đơn thuốc. /no_think"
@@ -157,6 +159,8 @@ def run_rag_pipeline(
                 history=history,
                 question=question,
                 context=context,
+                web_search_enabled=True,
+                allow_numeric_citations=True,
             )
             web_result = get_tavily_agent_answer_with_sources(messages_for_web)
             web_answer = (web_result or {}).get("answer", "")
@@ -176,7 +180,14 @@ def run_rag_pipeline(
             logger.warning(f"[RAG] Tavily fallback failed, continue with local generation: {e}")
 
     # ── 6. Generation ─────────────────────────────────────────────────────────
-    messages = _build_generation_messages(route, history, question, context)
+    messages = _build_generation_messages(
+        route,
+        history,
+        question,
+        context,
+        web_search_enabled=bool(web_search_enabled),
+        allow_numeric_citations=False,
+    )
     try:
         from ..services.brain import get_response
 
@@ -194,6 +205,153 @@ def run_rag_pipeline(
 
     return {
         "answer": answer,
+        # Never expose local RAG citations to client payload.
+        "citations": [],
+        "route": route,
+        "web_search_used": web_search_used,
+        "web_search_reason": tavily_reason,
+    }
+
+
+def run_rag_pipeline_stream(
+    question: str,
+    history: List[Dict[str, str]],
+    top_k: int = 5,
+    web_search_enabled: bool | None = None,
+) -> Dict[str, Any]:
+    """Streaming variant of the RAG pipeline.
+
+    Returns a dict with:
+      - answer_stream: Iterator[str]
+      - answer_parts: list[str] (filled while streaming)
+      - route, citations, web_search_used, web_search_reason
+    """
+    citations: List[Dict[str, Any]] = []
+    route = "medical"
+    web_search_used = False
+
+    try:
+        from ..core.guardrails import get_guardrails_service
+
+        guard = get_guardrails_service()
+        is_valid, violation, _metadata = guard.validate_query(question)
+        if not is_valid:
+            rejected = guard.get_rejection_message(violation or "unknown")
+
+            def _blocked_stream() -> Iterator[str]:
+                yield rejected
+
+            return {
+                "answer_stream": _blocked_stream(),
+                "answer_parts": [rejected],
+                "citations": [],
+                "route": "blocked",
+                "web_search_used": False,
+                "web_search_reason": "guard_blocked",
+            }
+    except Exception as e:
+        logger.warning(f"[GUARD][STREAM] Service unavailable, fail-open: {e}")
+
+    try:
+        from ..services.brain import detect_route
+
+        detected = detect_route(history, question)
+        route = (detected or "medical").strip().lower()
+        if route not in ("medical", "general"):
+            route = "medical"
+    except Exception as e:
+        logger.warning(f"[RAG][STREAM] Intent detection failed: {e}")
+        route = "medical"
+
+    enhanced_query = question
+    if history:
+        try:
+            from ..services.brain import enhance_query_quality
+
+            enhanced_query = enhance_query_quality(history, question) or question
+        except Exception as e:
+            logger.warning(f"[RAG][STREAM] Query enhancement failed: {e}")
+
+    context = ""
+    if route == "medical":
+        try:
+            from ..core.hybrid_search import hybrid_search
+
+            raw_results = hybrid_search(enhanced_query, top_k=top_k * 2)
+            if raw_results:
+                results = _rerank(enhanced_query, raw_results, top_k)
+                context, citations = _build_context(results)
+        except Exception as e:
+            logger.error(f"[RAG][STREAM] Search pipeline failed: {e}")
+
+    tavily_enabled = bool(settings.tavily_api_key or os.getenv("TAVILY_API_KEY"))
+    use_tavily = bool(web_search_enabled) and tavily_enabled
+    if web_search_enabled is True and not tavily_enabled:
+        tavily_reason = "tavily_unavailable"
+    elif web_search_enabled is True and tavily_enabled:
+        tavily_reason = "client_enabled"
+    else:
+        tavily_reason = "client_disabled"
+
+    if use_tavily:
+        try:
+            from ..services.brain import get_tavily_agent_answer_with_sources
+
+            messages_for_web = _build_generation_messages(
+                route=route,
+                history=history,
+                question=question,
+                context=context,
+                web_search_enabled=True,
+                allow_numeric_citations=True,
+            )
+            web_result = get_tavily_agent_answer_with_sources(messages_for_web)
+            web_answer = (web_result or {}).get("answer", "")
+            web_citations = (web_result or {}).get("citations", [])
+
+            if web_answer and not web_answer.startswith("Xin lỗi"):
+                web_search_used = True
+
+                def _web_stream() -> Iterator[str]:
+                    # lightweight chunking for non-streaming Tavily branch
+                    for part in web_answer.split(" "):
+                        yield f"{part} "
+
+                return {
+                    "answer_stream": _web_stream(),
+                    "answer_parts": [],
+                    "citations": web_citations,
+                    "route": f"{route}_web",
+                    "web_search_used": web_search_used,
+                    "web_search_reason": tavily_reason,
+                    "static_answer": web_answer,
+                }
+        except Exception as e:
+            logger.warning(f"[RAG][STREAM] Tavily fallback failed: {e}")
+
+    messages = _build_generation_messages(
+        route,
+        history,
+        question,
+        context,
+        web_search_enabled=bool(web_search_enabled),
+        allow_numeric_citations=False,
+    )
+
+    from ..services.brain import get_response_stream
+
+    answer_parts: List[str] = []
+
+    def _answer_stream() -> Iterator[str]:
+        for token in get_response_stream(messages, temperature=0.7, max_tokens=2048):
+            if not token:
+                continue
+            answer_parts.append(token)
+            yield token
+
+    return {
+        "answer_stream": _answer_stream(),
+        "answer_parts": answer_parts,
         # Never expose local RAG citations to client payload.
         "citations": [],
         "route": route,
@@ -248,7 +406,7 @@ def _build_context(
             or doc.get("rrf_score")
             or doc.get("score", 0.0)
         )
-        context_parts.append(f"[{i}] **{title}**\n{content_text}")
+        context_parts.append(f"**Tài liệu {i}: {title}**\n{content_text}")
         citations.append(
             {
                 "title": title,
@@ -266,6 +424,8 @@ def _build_generation_messages(
     history: List[Dict[str, str]],
     question: str,
     context: str,
+    web_search_enabled: bool = False,
+    allow_numeric_citations: bool = False,
 ) -> List[Dict[str, str]]:
     """Compose the OpenAI-style message list sent to the LLM."""
     system_prompt = MEDICAL_SYSTEM_PROMPT if route == "medical" else GENERAL_SYSTEM_PROMPT
@@ -281,10 +441,21 @@ def _build_generation_messages(
             f"---\n\n**Câu hỏi:** {question}\n\n"
             "Dựa vào tài liệu tham khảo trên và kiến thức y khoa của bạn, "
             "hãy trả lời câu hỏi bằng tiếng Việt một cách đầy đủ và chính xác. "
-            "Sử dụng số [1], [2], ... để trích dẫn tài liệu khi cần."
+            + (
+                "Sử dụng số [1], [2], ... để trích dẫn khi cần và thêm mục Nguồn tham khảo ở cuối."
+                if web_search_enabled and allow_numeric_citations
+                else "Không chèn bất kỳ số trích dẫn dạng [n] nào và không thêm mục Nguồn tham khảo."
+            )
         )
     else:
-        user_content = question
+        user_content = (
+            f"{question}\n\n"
+            + (
+                "Nếu không có web search, không được thêm [1], [2] hoặc Nguồn tham khảo."
+                if not web_search_enabled
+                else ""
+            )
+        ).strip()
 
     messages.append({"role": "user", "content": user_content})
     return messages
