@@ -1,11 +1,13 @@
 """Chat router — threads, messages, feedbacks, RAG ask."""
 
+import json
 import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import StreamingResponse
 from loguru import logger
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -381,6 +383,127 @@ def ask(
         citations=[Citation(**c) for c in public_citations],
         route=result["route"],
     )
+
+
+@router.post(
+    "/threads/{thread_id}/ask-stream",
+    status_code=200,
+    summary="Send a message and stream AI response via SSE",
+)
+def ask_stream(
+    thread_id: UUID,
+    body: AskRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db_session),
+):
+    """Streaming pipeline: persists user message immediately and streams assistant chunks."""
+    thread = _get_user_thread(db, thread_id, current_user.id)
+
+    history_msgs = (
+        db.query(Message)
+        .filter(Message.thread_id == thread_id)
+        .order_by(Message.created_at.asc())
+        .limit(20)
+        .all()
+    )
+    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+
+    user_msg = Message(thread_id=thread.id, role="user", content=body.content)
+    db.add(user_msg)
+    db.commit()
+    db.refresh(user_msg)
+
+    def _to_sse(event: str, payload: dict[str, Any]) -> str:
+        return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
+
+    def _stream_generator():
+        assistant_text = ""
+        route = "medical"
+        web_search_used = False
+        citations: list[dict[str, Any]] = []
+
+        try:
+            from ..routers.rag import run_rag_pipeline_stream
+
+            stream_result = run_rag_pipeline_stream(
+                question=body.content,
+                history=history,
+                top_k=settings.top_k,
+                web_search_enabled=body.web_search_enabled,
+            )
+            stream_iter = stream_result.get("answer_stream")
+            route = str(stream_result.get("route") or "medical")
+            web_search_used = bool(stream_result.get("web_search_used", False))
+            citations = stream_result.get("citations", []) or []
+
+            static_answer = (stream_result.get("static_answer") or "").strip()
+            if static_answer:
+                assistant_text = static_answer
+                for token in static_answer.split(" "):
+                    yield _to_sse("chunk", {"chunk": f"{token} "})
+            elif stream_iter is not None:
+                for chunk in stream_iter:
+                    if not chunk:
+                        continue
+                    assistant_text += chunk
+                    yield _to_sse("chunk", {"chunk": chunk})
+
+            assistant_text = assistant_text.strip()
+            if not assistant_text:
+                assistant_text = "Xin lỗi, hệ thống đang gặp sự cố. Vui lòng thử lại."
+                route = "error"
+
+            assistant_metadata = _sanitize_assistant_metadata(
+                {
+                    "citations": citations,
+                    "route": route,
+                    "web_search_enabled": bool(body.web_search_enabled),
+                    "web_search_used": web_search_used,
+                },
+                web_search_enabled=bool(body.web_search_enabled),
+            )
+
+            assistant_msg = Message(
+                thread_id=thread.id,
+                role="assistant",
+                content=assistant_text,
+                metadata_=assistant_metadata,
+            )
+            db.add(assistant_msg)
+
+            if not history_msgs:
+                thread.title = body.content[:60] + ("…" if len(body.content) > 60 else "")
+                db.add(thread)
+
+            db.commit()
+            db.refresh(assistant_msg)
+
+            done_payload = {
+                "route": route,
+                "citations": assistant_metadata.get("citations", []),
+                "user_message": MessageResponse.model_validate(user_msg).model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                "assistant_message": MessageResponse.model_validate(assistant_msg).model_dump(
+                    mode="json",
+                    by_alias=True,
+                ),
+                "done": True,
+            }
+            yield _to_sse("done", done_payload)
+        except Exception as exc:
+            logger.error(f"[ASK_STREAM] Failed: {exc}")
+            db.rollback()
+            yield _to_sse(
+                "error",
+                {
+                    "error": "Đã có lỗi xảy ra khi xử lý luồng phản hồi.",
+                    "done": True,
+                },
+            )
+
+    return StreamingResponse(_stream_generator(), media_type="text/event-stream")
 
 
 # ────────────────────────────────────────────────────────────
