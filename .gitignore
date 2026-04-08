@@ -5,5 +5,14 @@ data/
 models/
 node_modules/
 
+# Project-generated and local-only folders
+backend/scripts/
+backend/tests/
+qdrant_data/
+rehierarchy_output/
+scripts/
+temp/
+
 # Ignore environment files
 database/.env
+.env
