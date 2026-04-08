@@ -1,0 +1,6 @@
+{
+    "python.terminal.executeInFileDir": true,
+    "python.terminal.focusAfterLaunch": false,
+    "python.linting.enabled": false,
+    "python.terminal.activateEnvironment": false
+}

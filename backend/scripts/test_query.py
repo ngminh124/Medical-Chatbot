@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Test Query Script - Vietnamese Medical Chatbot
+Test Query Script - Minqes
 ================================================
 Script tương tác để test hệ thống RAG:
   1. Kết nối Qdrant & Embedding Service
@@ -298,7 +298,7 @@ def show_sample_questions():
 
 def main():
     console.print(Panel(
-        "[bold cyan]🏥 Vietnamese Medical Chatbot — Test Query[/bold cyan]\n\n"
+        "[bold cyan]🏥 Minqes — Test Query[/bold cyan]\n\n"
         f"Qdrant:     {settings.qdrant_host}:{settings.qdrant_port}\n"
         f"Collection: {settings.default_collection_name}\n"
         f"Embedding:  {settings.embedding_model_name}\n"
