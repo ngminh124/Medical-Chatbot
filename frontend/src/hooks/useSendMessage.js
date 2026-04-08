@@ -14,7 +14,7 @@ export function useSendMessage(sender) {
     setIsSending(false);
   }, []);
 
-  const sendMessage = useCallback(
+  const sendMessageStream = useCallback(
     async (payload) => {
       if (isSending) return;
 
@@ -34,6 +34,8 @@ export function useSendMessage(sender) {
     [isSending, sender]
   );
 
+  const sendMessage = sendMessageStream;
+
   useEffect(() => {
     return () => {
       abortControllerRef.current?.abort();
@@ -44,6 +46,7 @@ export function useSendMessage(sender) {
   return {
     isSending,
     sendMessage,
+    sendMessageStream,
     stopSending,
     abortControllerRef,
   };
