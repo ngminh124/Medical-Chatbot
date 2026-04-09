@@ -1,46 +1,61 @@
-# Core dependencies
-loguru
-python-dotenv
-
-# Qdrant vector database
-qdrant-client
-
-# Configuration management
-pydantic-settings
-
-# Embedding & ML
-sentence-transformers
-torch
-transformers
+# Core
+loguru>=0.7,<1
+python-dotenv>=1,<2
 
 # FastAPI web framework
-fastapi
-uvicorn[standard]
-pydantic
+fastapi>=0.110,<1
+uvicorn[standard]>=0.24,<1
+gunicorn>=21,<23
+python-multipart>=0.0.9,<1
 
-# HTTP client
-httpx
+# Config / validation
+pydantic>=2.6,<3
+pydantic-settings>=2,<3
+pydantic[email]>=2.6,<3
 
-# OpenAI & Web Search
-openai
-tavily-python
+# HTTP clients
+httpx>=0.26,<1
+requests>=2.31,<3
 
-# Utilities
-tqdm
-numpy
-rich
+# Vector DB
+qdrant-client>=1.9,<2
 
-# Elasticsearch (pin to 8.x to match server 8.15.0 in Docker)
+# Elasticsearch (pin to 8.x to match server 8.15.x in Docker)
 elasticsearch>=8.0.0,<9.0.0
 
 # PostgreSQL ORM
-sqlalchemy
-psycopg2-binary
+sqlalchemy>=2.0,<3
+psycopg2-binary>=2.9,<3
 
 # Authentication
-bcrypt
-python-jose[cryptography]
-pydantic[email]
+bcrypt>=4.1,<5
+python-jose[cryptography]>=3.3,<4
 
 # Redis cache (optional)
-redis
+redis>=5,<6
+
+# Background jobs
+celery>=5.3,<6
+
+# Observability
+prometheus-client>=0.20,<1
+opentelemetry-api>=1.24,<2
+opentelemetry-sdk>=1.24,<2
+opentelemetry-exporter-otlp-proto-grpc>=1.24,<2
+opentelemetry-instrumentation-fastapi>=0.45b0,<1
+
+# Model / Embeddings
+numpy>=1.26,<3
+torch
+transformers>=4.41,<5
+sentence-transformers>=2.6,<4
+datasets>=2.19,<3
+
+# Web search providers
+openai>=1.30,<2
+tavily-python>=0.5,<1
+
+# Utilities
+tqdm>=4.66,<5
+rich>=13.7,<14
+PyYAML>=6.0,<7
