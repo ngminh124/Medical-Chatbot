@@ -2,7 +2,6 @@ venv/
 __pycache__/
 *.pyc
 data/
-models/
 node_modules/
 
 # Project-generated and local-only folders
