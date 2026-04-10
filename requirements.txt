@@ -1,27 +1,37 @@
-# Core
+# Core dependencies
 loguru
 python-dotenv
+
+# Qdrant vector database
+qdrant-client
+
+# Configuration management
+pydantic-settings
+
+# Embedding & ML
+sentence-transformers
+torch
+transformers
 
 # FastAPI web framework
 fastapi
 uvicorn[standard]
-gunicorn
-python-multipart
-
-# Config / validation
 pydantic
-pydantic-settings
-pydantic[email]
 
-# HTTP clients
+# HTTP client
 httpx
-requests
 
-# Vector DB
-qdrant-client
+# OpenAI & Web Search
+openai
+tavily-python
 
-# Elasticsearch
-elasticsearch
+# Utilities
+tqdm
+numpy
+rich
+
+# Elasticsearch (pin to 8.x to match server 8.15.0 in Docker)
+elasticsearch>=8.0.0,<9.0.0
 
 # PostgreSQL ORM
 sqlalchemy
@@ -30,32 +40,7 @@ psycopg2-binary
 # Authentication
 bcrypt
 python-jose[cryptography]
+pydantic[email]
 
 # Redis cache (optional)
 redis
-
-# Background jobs
-celery
-
-# Observability
-prometheus-client
-opentelemetry-api
-opentelemetry-sdk
-opentelemetry-exporter-otlp-proto-grpc
-opentelemetry-instrumentation-fastapi
-
-# Model / Embeddings
-numpy
-torch
-transformers
-sentence-transformers
-datasets
-
-# Web search providers
-openai
-tavily-python
-
-# Utilities
-tqdm
-rich
-PyYAML
