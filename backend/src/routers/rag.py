@@ -1,12 +1,29 @@
 """RAG pipeline — retrieval-augmented generation for Minqes."""
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
+import hashlib
 import os
+import re
+import time
 from typing import Any, Dict, Iterator, List
 
 from fastapi import APIRouter, Depends
+import httpx
 from loguru import logger
 
 from ..configs.setup import get_backend_settings
+from ..core.metrics import (
+    rag_cache_hits_total,
+    rag_cache_misses_total,
+    rag_cache_requests_total,
+    rag_errors_total,
+    rag_llm_duration_seconds,
+    rag_request_duration_seconds,
+    rag_requests_total,
+    rag_retrieval_duration_seconds,
+)
+from ..core.runtime_settings import get_runtime_settings
 from ..core.security import get_current_user
 
 settings = get_backend_settings()
@@ -36,6 +53,102 @@ GENERAL_SYSTEM_PROMPT = (
     "Hãy trả lời thân thiện và hữu ích bằng tiếng Việt. /no_think"
 )
 
+MAX_CONTEXT_CHARS = 6000  # ~1500 tokens (rough)
+RETRIEVAL_TIMEOUT_SECONDS = max(1.0, float(os.getenv("RETRIEVAL_TIMEOUT_SECONDS", "2.0")))
+
+
+def _build_retrieval_cache_key(
+    question: str,
+    top_k: int,
+    vector_k: int,
+    bm25_k: int,
+    final_k: int,
+) -> str:
+    raw = "::".join(
+        [
+            (question or "").strip().lower(),
+            str(top_k),
+            str(vector_k),
+            str(bm25_k),
+            str(final_k),
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _run_hybrid_search_with_timeout(
+    query: str,
+    *,
+    top_k: int,
+    vector_k: int,
+    bm25_k: int,
+    final_k: int,
+) -> List[Dict[str, Any]]:
+    from ..core.hybrid_search import hybrid_search
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            hybrid_search,
+            query,
+            top_k,
+            vector_k,
+            bm25_k,
+            final_k,
+        )
+        try:
+            return future.result(timeout=RETRIEVAL_TIMEOUT_SECONDS) or []
+        except FutureTimeoutError:
+            logger.warning(f"[TIMEOUT] retrieval timeout after {RETRIEVAL_TIMEOUT_SECONDS:.1f}s")
+            return []
+
+
+def _extract_tavily_query(question: str) -> str:
+    text = re.sub(r"\s+", " ", (question or "")).strip()
+    return text[:400]
+
+
+def _normalize_tavily_results(results: List[dict], max_results: int = 2) -> List[Dict[str, Any]]:
+    citations: List[Dict[str, Any]] = []
+    for item in (results or [])[:max_results]:
+        content = re.sub(r"\s+", " ", str(item.get("content") or "")).strip()
+        snippet = content[:220] + ("…" if len(content) > 220 else "")
+        citations.append(
+            {
+                "title": item.get("title") or "Nguồn web",
+                "url": item.get("url") or "",
+                "snippet": snippet,
+                "content": snippet,
+                "type": "web",
+                "score": float(item.get("score") or 0.0),
+            }
+        )
+    return citations
+
+
+async def _tavily_search_async(query: str, max_results: int = 2) -> tuple[str, List[Dict[str, Any]]]:
+    api_key = settings.tavily_api_key or os.getenv("TAVILY_API_KEY", "")
+    if not api_key:
+        raise RuntimeError("Missing Tavily API key")
+
+    url = "https://api.tavily.com/search"
+    payload = {
+        "api_key": api_key,
+        "query": query,
+        "max_results": max_results,
+    }
+    timeout = httpx.Timeout(connect=2.0, read=6.0, write=3.0, pool=2.0)
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        resp = await client.post(url, json=payload)
+        resp.raise_for_status()
+        body = resp.json() or {}
+
+    citations = _normalize_tavily_results(body.get("results") or [], max_results=max_results)
+    observation = "\n".join(
+        f"- {c.get('title', 'Nguồn web')}: {c.get('snippet', '')} ({c.get('url', '')})"
+        for c in citations
+    )
+    return observation, citations
+
 
 # ────────────────────────────────────────────────────────────
 #  Public: run_rag_pipeline  (imported by the chat router)
@@ -53,7 +166,7 @@ def run_rag_pipeline(
     -----
     1. Guardrails check         (soft-fail — continues if GPU service is down)
     2. Intent detection         (medical vs general)
-    3. Query enhancement        (rewrite with conversation context)
+    3. Query rewrite            (Gemini API with context)
     4. Hybrid search            (Qdrant vector + Elasticsearch BM25 via RRF)
     5. Reranking                (Qwen3-Reranker-0.6B)
     6. Answer generation        (vLLM → Ollama fallback)
@@ -65,6 +178,38 @@ def run_rag_pipeline(
     citations: List[Dict[str, Any]] = []
     route = "medical"
     web_search_used = False
+    total_start = time.perf_counter()
+    rag_requests_total.inc()
+
+    runtime = get_runtime_settings()
+    rewrite_enabled = bool(runtime.get("rewrite_enabled", True))
+    rerank_enabled = bool(runtime.get("rerank_enabled", True))
+    max_tokens = int(runtime.get("max_tokens", 512))
+
+    # ── 0. Final response cache (before retrieval/LLM) ──────────────────────
+    try:
+        from ..services.brain import get_cached_final_response
+
+        cached_final = get_cached_final_response(
+            question=question,
+            history=history,
+            web_search_enabled=bool(web_search_enabled),
+        )
+        if cached_final:
+            logger.info("[RAG] Final response cache hit")
+            rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            return {
+                "answer": str(cached_final.get("answer") or ""),
+                "citations": list(cached_final.get("citations") or []),
+                "route": str(cached_final.get("route") or "medical"),
+                "web_search_used": bool(cached_final.get("web_search_used", False)),
+                "web_search_reason": str(cached_final.get("web_search_reason") or "cache"),
+            }
+    except Exception:
+        pass
+    final_k = max(1, min(int(settings.final_k), max(2, top_k)))
+    vector_k = max(final_k, min(int(settings.vector_k), final_k + 2))
+    bm25_k = max(final_k, min(int(settings.bm25_k), final_k + 2))
 
     # ── 1. Guardrails ─────────────────────────────────────────────────────────
     try:
@@ -105,40 +250,19 @@ def run_rag_pipeline(
         logger.warning(f"[RAG] Intent detection failed, defaulting to 'medical': {e}")
         route = "medical"
 
-    # ── 3. Query enhancement ─────────────────────────────────────────────────
-    enhanced_query = question
-    if history:
+    # ── 3. Query rewrite ─────────────────────────────────────────────────────
+    rewritten_query = question
+    if rewrite_enabled:
         try:
-            from ..services.brain import enhance_query_quality
+            from ..services.rewrite_service import rewrite_query_with_api
 
-            enhanced_query = enhance_query_quality(history, question) or question
-            logger.debug(f"[RAG] Enhanced query: {enhanced_query[:120]}")
+            rewritten_query = rewrite_query_with_api(question, history) or question
         except Exception as e:
-            logger.warning(f"[RAG] Query enhancement failed, using original: {e}")
+            logger.warning(f"[RAG] Query rewrite failed, using original: {e}")
+            rewritten_query = question
 
-    # ── 4 & 5. Hybrid search + Reranking  (medical route only) ──────────────
+    # ── 4. Smart routing: if web search enabled, skip local RAG retrieval ───
     context = ""
-    retrieval_confidence = 0.0
-    if route == "medical":
-        try:
-            from ..core.hybrid_search import hybrid_search
-
-            raw_results = hybrid_search(enhanced_query, top_k=top_k * 2)
-            logger.info(f"[RAG] Retrieved {len(raw_results)} raw candidates")
-            if raw_results:
-                results = _rerank(enhanced_query, raw_results, top_k)
-                context, citations = _build_context(results)
-                if results:
-                    retrieval_confidence = float(
-                        results[0].get("relevance_score")
-                        or results[0].get("rrf_score")
-                        or results[0].get("score", 0.0)
-                    )
-                logger.info(f"[RAG] Using {len(citations)} documents as context")
-        except Exception as e:
-            logger.error(f"[RAG] Search pipeline failed, generating without context: {e}")
-
-    # ── 5.5 Optional Tavily fallback ─────────────────────────────────────────
     tavily_enabled = bool(settings.tavily_api_key or os.getenv("TAVILY_API_KEY"))
     use_tavily = bool(web_search_enabled) and tavily_enabled
     tavily_reason = ""
@@ -151,33 +275,119 @@ def run_rag_pipeline(
 
     if use_tavily:
         try:
-            from ..services.brain import get_tavily_agent_answer_with_sources
+            from ..services.brain import get_response
 
-            logger.info(f"[RAG] 🌐 Tavily fallback enabled ({tavily_reason})")
-            messages_for_web = _build_generation_messages(
-                route=route,
-                history=history,
-                question=question,
-                context=context,
-                web_search_enabled=True,
-                allow_numeric_citations=True,
+            logger.info(f"[RAG] 🌐 Tavily enabled ({tavily_reason})")
+            search_query = _extract_tavily_query(question)
+            observation, web_citations = asyncio.run(
+                _tavily_search_async(search_query, max_results=2)
             )
-            web_result = get_tavily_agent_answer_with_sources(messages_for_web)
-            web_answer = (web_result or {}).get("answer", "")
-            web_citations = (web_result or {}).get("citations", [])
+            if not web_citations:
+                raise RuntimeError("No Tavily results")
 
-            if web_answer and not web_answer.startswith("Xin lỗi"):
-                web_search_used = True
-                return {
-                    "answer": web_answer,
-                    "citations": web_citations,
-                    "route": f"{route}_web",
-                    "web_search_used": web_search_used,
-                    "web_search_reason": tavily_reason,
-                }
-            logger.warning("[RAG] Tavily returned empty/error answer, fallback to normal generation")
+            web_messages = [
+                {
+                    "role": "system",
+                    "content": (
+                        "Bạn là trợ lý y tế Việt Nam. Trả lời dựa trên kết quả web, "
+                        "chính xác, ngắn gọn, và trích dẫn nguồn URL trong câu trả lời."
+                    ),
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Kết quả web:\n{observation}\n\n"
+                        f"Câu hỏi: {question}\n"
+                        "Hãy trả lời bằng tiếng Việt."
+                    ),
+                },
+            ]
+            web_answer = get_response(web_messages, temperature=0.3, max_tokens=512)
+            if not web_answer:
+                raise RuntimeError("LLM unavailable for web answer")
+
+            web_search_used = True
+            result_payload = {
+                "answer": web_answer,
+                "citations": web_citations,
+                "route": f"{route}_web",
+                "web_search_used": web_search_used,
+                "web_search_reason": tavily_reason,
+            }
+            try:
+                from ..services.brain import cache_final_response
+
+                cache_final_response(
+                    question=question,
+                    history=history,
+                    web_search_enabled=True,
+                    payload=result_payload,
+                )
+            except Exception:
+                pass
+
+            logger.info(f"[PERF] total_time={time.perf_counter() - total_start:.3f}s")
+            rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            return result_payload
         except Exception as e:
-            logger.warning(f"[RAG] Tavily fallback failed, continue with local generation: {e}")
+            logger.warning(f"[RAG] Tavily failed, return immediate fallback: {e}")
+            rag_errors_total.inc()
+            rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            return {
+                "answer": "Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau.",
+                "citations": [],
+                "route": f"{route}_web",
+                "web_search_used": False,
+                "web_search_reason": "tavily_failed",
+            }
+
+    # ── 5. Hybrid search + rerank (only when web search is OFF) ─────────────
+    retrieval_start = time.perf_counter()
+    if route == "medical" and not bool(web_search_enabled):
+        try:
+            from ..core.cache import cache_search_results, get_search_results
+
+            retrieval_cache_key = _build_retrieval_cache_key(
+                question=rewritten_query,
+                top_k=top_k,
+                vector_k=vector_k,
+                bm25_k=bm25_k,
+                final_k=final_k,
+            )
+
+            raw_results = get_search_results(retrieval_cache_key)
+            rag_cache_requests_total.inc()
+            if raw_results is None:
+                logger.info(f"[CACHE] retrieval miss: {retrieval_cache_key[:16]}...")
+                rag_cache_misses_total.inc()
+                raw_results = _run_hybrid_search_with_timeout(
+                    query=rewritten_query,
+                    top_k=final_k,
+                    vector_k=vector_k,
+                    bm25_k=bm25_k,
+                    final_k=final_k,
+                )
+                cache_search_results(
+                    retrieval_cache_key,
+                    raw_results or [],
+                    ttl_seconds=600,
+                )
+            else:
+                logger.info(f"[CACHE] retrieval hit: {retrieval_cache_key[:16]}...")
+                rag_cache_hits_total.inc()
+
+            if raw_results:
+                if rerank_enabled:
+                    results = _rerank(rewritten_query, raw_results, final_k)
+                else:
+                    results = raw_results[:final_k]
+                context, citations = _build_context(results)
+        except Exception as e:
+            logger.error(f"[ERROR] [FALLBACK] [RAG] Search pipeline failed, generating without context: {e}")
+            rag_errors_total.inc()
+    retrieval_duration = time.perf_counter() - retrieval_start
+    rag_retrieval_duration_seconds.observe(retrieval_duration)
+    logger.info(f"[PERF] retrieval_time={retrieval_duration:.3f}s")
 
     # ── 6. Generation ─────────────────────────────────────────────────────────
     messages = _build_generation_messages(
@@ -191,9 +401,14 @@ def run_rag_pipeline(
     try:
         from ..services.brain import get_response
 
-        answer = get_response(messages, temperature=0.7, max_tokens=2048)
+        llm_start = time.perf_counter()
+        answer = get_response(messages, temperature=0.3, max_tokens=max_tokens)
+        llm_duration = time.perf_counter() - llm_start
+        rag_llm_duration_seconds.observe(llm_duration)
+        logger.info(f"[PERF] llm_time={llm_duration:.3f}s")
     except Exception as e:
         logger.error(f"[RAG] Generation failed: {e}")
+        rag_errors_total.inc()
         answer = None
 
     if not answer:
@@ -203,7 +418,7 @@ def run_rag_pipeline(
         )
         citations = []
 
-    return {
+    result_payload = {
         "answer": answer,
         # Never expose local RAG citations to client payload.
         "citations": [],
@@ -211,6 +426,23 @@ def run_rag_pipeline(
         "web_search_used": web_search_used,
         "web_search_reason": tavily_reason,
     }
+
+    try:
+        from ..services.brain import cache_final_response
+
+        cache_final_response(
+            question=question,
+            history=history,
+            web_search_enabled=bool(web_search_enabled),
+            payload=result_payload,
+        )
+    except Exception:
+        pass
+
+    total_duration = time.perf_counter() - total_start
+    rag_request_duration_seconds.observe(total_duration)
+    logger.info(f"[PERF] total_time={total_duration:.3f}s")
+    return result_payload
 
 
 def run_rag_pipeline_stream(
@@ -229,6 +461,43 @@ def run_rag_pipeline_stream(
     citations: List[Dict[str, Any]] = []
     route = "medical"
     web_search_used = False
+    total_start = time.perf_counter()
+    rag_requests_total.inc()
+
+    runtime = get_runtime_settings()
+    rewrite_enabled = bool(runtime.get("rewrite_enabled", True))
+    rerank_enabled = bool(runtime.get("rerank_enabled", True))
+    max_tokens = int(runtime.get("max_tokens", 512))
+
+    try:
+        from ..services.brain import get_cached_final_response
+
+        cached_final = get_cached_final_response(
+            question=question,
+            history=history,
+            web_search_enabled=bool(web_search_enabled),
+        )
+        if cached_final and cached_final.get("answer"):
+            cached_answer = str(cached_final.get("answer"))
+
+            def _cached_stream() -> Iterator[str]:
+                for part in cached_answer.split(" "):
+                    yield f"{part} "
+
+            return {
+                "answer_stream": _cached_stream(),
+                "answer_parts": [cached_answer],
+                "citations": list(cached_final.get("citations") or []),
+                "route": str(cached_final.get("route") or "medical"),
+                "web_search_used": bool(cached_final.get("web_search_used", False)),
+                "web_search_reason": "cache",
+                "static_answer": cached_answer,
+            }
+    except Exception:
+        pass
+    final_k = max(1, min(int(settings.final_k), max(2, top_k)))
+    vector_k = max(final_k, min(int(settings.vector_k), final_k + 2))
+    bm25_k = max(final_k, min(int(settings.bm25_k), final_k + 2))
 
     try:
         from ..core.guardrails import get_guardrails_service
@@ -263,27 +532,17 @@ def run_rag_pipeline_stream(
         logger.warning(f"[RAG][STREAM] Intent detection failed: {e}")
         route = "medical"
 
-    enhanced_query = question
-    if history:
+    rewritten_query = question
+    if rewrite_enabled:
         try:
-            from ..services.brain import enhance_query_quality
+            from ..services.rewrite_service import rewrite_query_with_api
 
-            enhanced_query = enhance_query_quality(history, question) or question
+            rewritten_query = rewrite_query_with_api(question, history) or question
         except Exception as e:
-            logger.warning(f"[RAG][STREAM] Query enhancement failed: {e}")
+            logger.warning(f"[RAG][STREAM] Query rewrite failed: {e}")
+            rewritten_query = question
 
     context = ""
-    if route == "medical":
-        try:
-            from ..core.hybrid_search import hybrid_search
-
-            raw_results = hybrid_search(enhanced_query, top_k=top_k * 2)
-            if raw_results:
-                results = _rerank(enhanced_query, raw_results, top_k)
-                context, citations = _build_context(results)
-        except Exception as e:
-            logger.error(f"[RAG][STREAM] Search pipeline failed: {e}")
-
     tavily_enabled = bool(settings.tavily_api_key or os.getenv("TAVILY_API_KEY"))
     use_tavily = bool(web_search_enabled) and tavily_enabled
     if web_search_enabled is True and not tavily_enabled:
@@ -295,19 +554,26 @@ def run_rag_pipeline_stream(
 
     if use_tavily:
         try:
-            from ..services.brain import get_tavily_agent_answer_with_sources
+            from ..services.brain import get_response
 
-            messages_for_web = _build_generation_messages(
-                route=route,
-                history=history,
-                question=question,
-                context=context,
-                web_search_enabled=True,
-                allow_numeric_citations=True,
+            search_query = _extract_tavily_query(question)
+            observation, web_citations = asyncio.run(
+                _tavily_search_async(search_query, max_results=2)
             )
-            web_result = get_tavily_agent_answer_with_sources(messages_for_web)
-            web_answer = (web_result or {}).get("answer", "")
-            web_citations = (web_result or {}).get("citations", [])
+            if not web_citations:
+                raise RuntimeError("No Tavily results")
+
+            web_messages = [
+                {
+                    "role": "system",
+                    "content": "Bạn là trợ lý y tế Việt Nam, trả lời ngắn gọn và trích dẫn URL.",
+                },
+                {
+                    "role": "user",
+                    "content": f"Kết quả web:\n{observation}\n\nCâu hỏi: {question}",
+                },
+            ]
+            web_answer = get_response(web_messages, temperature=0.3, max_tokens=512)
 
             if web_answer and not web_answer.startswith("Xin lỗi"):
                 web_search_used = True
@@ -326,8 +592,68 @@ def run_rag_pipeline_stream(
                     "web_search_reason": tavily_reason,
                     "static_answer": web_answer,
                 }
+            raise RuntimeError("LLM unavailable for web answer")
         except Exception as e:
-            logger.warning(f"[RAG][STREAM] Tavily fallback failed: {e}")
+            logger.warning(f"[RAG][STREAM] Tavily failed: {e}")
+
+            def _fallback_web_stream() -> Iterator[str]:
+                yield "Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau."
+
+            return {
+                "answer_stream": _fallback_web_stream(),
+                "answer_parts": ["Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau."],
+                "citations": [],
+                "route": f"{route}_web",
+                "web_search_used": False,
+                "web_search_reason": "tavily_failed",
+            }
+
+    retrieval_start = time.perf_counter()
+    if route == "medical" and not bool(web_search_enabled):
+        try:
+            from ..core.cache import cache_search_results, get_search_results
+
+            retrieval_cache_key = _build_retrieval_cache_key(
+                question=rewritten_query,
+                top_k=top_k,
+                vector_k=vector_k,
+                bm25_k=bm25_k,
+                final_k=final_k,
+            )
+
+            raw_results = get_search_results(retrieval_cache_key)
+            rag_cache_requests_total.inc()
+            if raw_results is None:
+                logger.info(f"[CACHE] retrieval miss: {retrieval_cache_key[:16]}...")
+                rag_cache_misses_total.inc()
+                raw_results = _run_hybrid_search_with_timeout(
+                    query=rewritten_query,
+                    top_k=final_k,
+                    vector_k=vector_k,
+                    bm25_k=bm25_k,
+                    final_k=final_k,
+                )
+                cache_search_results(
+                    retrieval_cache_key,
+                    raw_results or [],
+                    ttl_seconds=600,
+                )
+            else:
+                logger.info(f"[CACHE] retrieval hit: {retrieval_cache_key[:16]}...")
+                rag_cache_hits_total.inc()
+
+            if raw_results:
+                if rerank_enabled:
+                    results = _rerank(rewritten_query, raw_results, final_k)
+                else:
+                    results = raw_results[:final_k]
+                context, citations = _build_context(results)
+        except Exception as e:
+            logger.error(f"[ERROR] [FALLBACK] [RAG][STREAM] Search pipeline failed: {e}")
+            rag_errors_total.inc()
+    retrieval_duration = time.perf_counter() - retrieval_start
+    rag_retrieval_duration_seconds.observe(retrieval_duration)
+    logger.info(f"[PERF] retrieval_time_stream={retrieval_duration:.3f}s")
 
     messages = _build_generation_messages(
         route,
@@ -343,11 +669,26 @@ def run_rag_pipeline_stream(
     answer_parts: List[str] = []
 
     def _answer_stream() -> Iterator[str]:
-        for token in get_response_stream(messages, temperature=0.7, max_tokens=2048):
-            if not token:
-                continue
-            answer_parts.append(token)
-            yield token
+        logger.info("[STREAM_START] rag_answer_stream")
+        llm_start = time.perf_counter()
+        token_count = 0
+        try:
+            for token in get_response_stream(messages, temperature=0.3, max_tokens=max_tokens):
+                if not token:
+                    continue
+                answer_parts.append(token)
+                token_count += 1
+                yield token
+            llm_duration = time.perf_counter() - llm_start
+            rag_llm_duration_seconds.observe(llm_duration)
+            logger.info(f"[PERF] llm_time_stream={llm_duration:.3f}s")
+            logger.info(f"[STREAM_END] rag_answer_stream tokens={token_count}")
+        except Exception as exc:
+            rag_errors_total.inc()
+            logger.error(f"[STREAM_ERROR] rag_answer_stream: {exc}")
+            raise
+        finally:
+            rag_request_duration_seconds.observe(time.perf_counter() - total_start)
 
     return {
         "answer_stream": _answer_stream(),
@@ -431,13 +772,23 @@ def _build_generation_messages(
     system_prompt = MEDICAL_SYSTEM_PROMPT if route == "medical" else GENERAL_SYSTEM_PROMPT
     messages: List[Dict[str, str]] = [{"role": "system", "content": system_prompt}]
 
-    # Include the last 6 conversation turns for context
-    recent = [m for m in history if m.get("role") in ("user", "assistant")][-6:]
+    ua_history = [m for m in history if m.get("role") in ("user", "assistant")]
+    if len(ua_history) > 6:
+        summary_text = _summarize_history(ua_history[:-4])
+        if summary_text:
+            messages.append({
+                "role": "assistant",
+                "content": f"Tóm tắt hội thoại trước đó: {summary_text}",
+            })
+
+    recent = _select_recent_history(ua_history)
     messages.extend(recent)
 
-    if context:
+    compact_context = (context or "")[:MAX_CONTEXT_CHARS]
+
+    if compact_context:
         user_content = (
-            f"**Tài liệu tham khảo:**\n\n{context}\n\n"
+            f"**Tài liệu tham khảo:**\n\n{compact_context}\n\n"
             f"---\n\n**Câu hỏi:** {question}\n\n"
             "Dựa vào tài liệu tham khảo trên và kiến thức y khoa của bạn, "
             "hãy trả lời câu hỏi bằng tiếng Việt một cách đầy đủ và chính xác. "
@@ -461,12 +812,37 @@ def _build_generation_messages(
     return messages
 
 
+def _select_recent_history(history: List[Dict[str, str]]) -> List[Dict[str, str]]:
+    """Keep last 2 user + last 2 assistant messages in chronological order."""
+    users = [m for m in history if m.get("role") == "user"][-2:]
+    assistants = [m for m in history if m.get("role") == "assistant"][-2:]
+    selected_ids = {id(m) for m in users + assistants}
+    return [m for m in history if id(m) in selected_ids]
+
+
+def _summarize_history(history: List[Dict[str, str]]) -> str:
+    """Short rule-based summary for older context without extra model calls."""
+    if not history:
+        return ""
+
+    texts: List[str] = []
+    for m in history[-6:]:
+        content = re.sub(r"\s+", " ", (m.get("content") or "").strip())
+        if content:
+            texts.append(content[:120])
+    if not texts:
+        return ""
+
+    summary = "; ".join(texts)
+    return summary[:320]
+
+
 # ────────────────────────────────────────────────────────────
 #  REST endpoint  (direct test — no DB persistence)
 # ────────────────────────────────────────────────────────────
 
 @router.post("/query")
-def rag_query(
+async def rag_query(
     body: dict,
     current_user=Depends(get_current_user),
 ):
@@ -481,10 +857,12 @@ def rag_query(
         return {"answer": "Vui lòng nhập câu hỏi.", "citations": [], "route": ""}
 
     logger.info(f"[RAG] Direct query from user {current_user.id}: {question[:80]}")
-    result = run_rag_pipeline(
-        question=question,
-        history=history,
-        web_search_enabled=web_search_enabled,
+    result = await asyncio.to_thread(
+        run_rag_pipeline,
+        question,
+        history,
+        5,
+        web_search_enabled,
     )
 
     return {
