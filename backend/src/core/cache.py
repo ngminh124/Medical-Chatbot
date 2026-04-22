@@ -59,7 +59,7 @@ def get_query_embedding(cache_key: str) -> Optional[List[float]]:
         return None
     
     try:
-        cached = client.get(f"emb:{cache_key}")
+        cached = client.get(f"embedding:{cache_key}") or client.get(f"emb:{cache_key}")
         if cached:
             logger.debug(f"Cache hit for query embedding: {cache_key[:50]}...")
             return json.loads(cached)
@@ -91,7 +91,7 @@ def cache_query_embedding(
     
     try:
         client.setex(
-            f"emb:{cache_key}",
+            f"embedding:{cache_key}",
             ttl_seconds,
             json.dumps(embedding),
         )
@@ -117,7 +117,7 @@ def get_search_results(cache_key: str) -> Optional[List[dict]]:
         return None
     
     try:
-        cached = client.get(f"search:{cache_key}")
+        cached = client.get(f"retrieval:{cache_key}") or client.get(f"search:{cache_key}")
         if cached:
             logger.debug(f"Cache hit for search results: {cache_key[:50]}...")
             return json.loads(cached)
@@ -149,7 +149,7 @@ def cache_search_results(
     
     try:
         client.setex(
-            f"search:{cache_key}",
+            f"retrieval:{cache_key}",
             ttl_seconds,
             json.dumps(results),
         )
@@ -184,3 +184,37 @@ def clear_cache(pattern: str = "*") -> int:
     except Exception as e:
         logger.warning(f"Cache clear error: {e}")
         return 0
+
+
+def get_final_answer(cache_key: str) -> Optional[dict]:
+    """Get cached final answer payload from Redis."""
+    client = _get_redis_client()
+    if client is None:
+        return None
+
+    try:
+        cached = client.get(f"answer:{cache_key}")
+        if cached:
+            return json.loads(cached)
+        return None
+    except Exception as e:
+        logger.warning(f"Cache read error: {e}")
+        return None
+
+
+def cache_final_answer(cache_key: str, payload: dict, ttl_seconds: int = 3600) -> bool:
+    """Cache final answer payload to Redis."""
+    client = _get_redis_client()
+    if client is None:
+        return False
+
+    try:
+        client.setex(
+            f"answer:{cache_key}",
+            ttl_seconds,
+            json.dumps(payload, ensure_ascii=False),
+        )
+        return True
+    except Exception as e:
+        logger.warning(f"Cache write error: {e}")
+        return False
