@@ -2,6 +2,7 @@
 Hybrid Search Module
 Combines vector search (Qdrant) with BM25 search using RRF fusion.
 """
+from concurrent.futures import ThreadPoolExecutor
 from typing import List, Dict, Optional
 
 from loguru import logger
@@ -62,6 +63,9 @@ def reciprocal_rank_fusion(
 def hybrid_search(
     query: str,
     top_k: int = None,
+    vector_k: int = None,
+    bm25_k: int = None,
+    final_k: int = None,
     collection_name: str = None,
     use_bm25: bool = True,
     use_vector: bool = True,
@@ -83,46 +87,70 @@ def hybrid_search(
     Returns:
         List of search results with RRF fusion scores
     """
-    top_k = top_k or settings.top_k
+    vector_k = int(vector_k or settings.vector_k)
+    bm25_k = int(bm25_k or settings.bm25_k)
+    final_k = int(final_k or top_k or settings.final_k)
+
+    if final_k <= 0:
+        final_k = settings.final_k
+    if vector_k <= 0:
+        vector_k = settings.vector_k
+    if bm25_k <= 0:
+        bm25_k = settings.bm25_k
+
     collection_name = collection_name or settings.default_collection_name
+
+    logger.info(
+        f"[RETRIEVAL] vector_k={vector_k}, bm25_k={bm25_k}, final_k={final_k}"
+    )
     
     results_lists = []
-    
-    # Vector search
-    if use_vector:
+
+    def _run_vector() -> List[Dict]:
+        if not use_vector:
+            return []
         try:
             embedding_service = get_embedding_service()
             query_vector = embedding_service.embed_query(query)
-            
-            if query_vector:
-                vector_results = search_vectors_for_hybrid(
-                    query_vector=query_vector,
-                    top_k=top_k * 2,  # Fetch more for fusion
-                    collection_name=collection_name,
-                    doc_type_filter=doc_type_filter,
-                    source_filter=source_filter,
-                )
-                results_lists.append(vector_results)
-                logger.debug(f"Vector search returned {len(vector_results)} results")
-            else:
-                logger.warning("Failed to create query embedding for vector search")
-        except Exception as e:
-            logger.error(f"Vector search error: {e}")
-    
-    # BM25 search (placeholder - implement with Elasticsearch)
-    if use_bm25:
-        try:
-            bm25_results = _bm25_search(
-                query=query,
-                top_k=top_k * 2,
+            if not query_vector:
+                return []
+            return search_vectors_for_hybrid(
+                query_vector=query_vector,
+                top_k=vector_k,
+                collection_name=collection_name,
                 doc_type_filter=doc_type_filter,
                 source_filter=source_filter,
             )
-            if bm25_results:
-                results_lists.append(bm25_results)
-                logger.debug(f"BM25 search returned {len(bm25_results)} results")
+        except Exception as e:
+            logger.error(f"Vector search error: {e}")
+            return []
+
+    def _run_bm25() -> List[Dict]:
+        if not use_bm25:
+            return []
+        try:
+            return _bm25_search(
+                query=query,
+                top_k=bm25_k,
+                doc_type_filter=doc_type_filter,
+                source_filter=source_filter,
+            )
         except Exception as e:
             logger.warning(f"BM25 search error (may not be configured): {e}")
+            return []
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(_run_vector)
+        bm25_future = executor.submit(_run_bm25)
+        vector_results = vector_future.result()
+        bm25_results = bm25_future.result()
+
+    if vector_results:
+        results_lists.append(vector_results)
+        logger.debug(f"Vector search returned {len(vector_results)} results")
+    if bm25_results:
+        results_lists.append(bm25_results)
+        logger.debug(f"BM25 search returned {len(bm25_results)} results")
     
     # Fusion
     if not results_lists:
@@ -131,13 +159,13 @@ def hybrid_search(
     
     if len(results_lists) == 1:
         # Single source - just return as-is with limit
-        return results_lists[0][:top_k]
+        return results_lists[0][:final_k]
     
     # RRF fusion
     fused_results = reciprocal_rank_fusion(results_lists)
-    logger.info(f"Hybrid search returned {len(fused_results[:top_k])} results after RRF fusion")
+    logger.info(f"Hybrid search returned {len(fused_results[:final_k])} results after RRF fusion")
     
-    return fused_results[:top_k]
+    return fused_results[:final_k]
 
 
 def _bm25_search(
