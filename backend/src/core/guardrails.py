@@ -72,12 +72,16 @@ class Qwen3GuardService:
         self.threshold = threshold or get_guardrails_threshold()
         self.huggingface_model = get_guardrails_model()
         self.timeout = float(settings.service_http_timeout)
-        self.max_retries = max(0, int(settings.service_http_retries))
+        self.max_retries = 0
         self.backoff_base = max(0.1, float(settings.service_http_backoff_seconds))
         self.client = httpx.Client(
             timeout=self.timeout,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
+        self._failures = 0
+        self._down_until = 0.0
+        self._down_ttl_seconds = 60
+        self._failure_threshold = 3
 
     def validate_query(self, query: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
@@ -208,6 +212,9 @@ class Qwen3GuardService:
     ) -> Tuple[bool, str, list, Optional[str], Dict]:
         """Check text safety using local FastAPI endpoint with Qwen3Guard-Gen-0.6B."""
         try:
+            if time.time() < self._down_until:
+                raise RuntimeError("Qwen3Guard service is temporarily DOWN (circuit breaker)")
+
             payload = {"text": text, "check_type": check_type}
             if check_type == "output" and query:
                 payload["query"] = query
@@ -222,6 +229,7 @@ class Qwen3GuardService:
                     )
 
                     if response.status_code == 200:
+                        self._failures = 0
                         break
 
                     if response.status_code < 500 and response.status_code != 429:
@@ -233,14 +241,17 @@ class Qwen3GuardService:
                         f"Qwen3Guard transient error: {response.status_code}"
                     )
                 except Exception as e:
+                    self._failures += 1
+                    if self._failures > self._failure_threshold:
+                        self._down_until = time.time() + self._down_ttl_seconds
+                        logger.warning(
+                            f"[GUARD][CB] Service marked DOWN for {self._down_ttl_seconds}s"
+                        )
                     if attempt >= self.max_retries:
                         raise
-                    sleep_s = self.backoff_base * (2**attempt)
                     logger.warning(
-                        f"[GUARD] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}. "
-                        f"Retrying in {sleep_s:.1f}s"
+                        f"[GUARD] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}."
                     )
-                    time.sleep(sleep_s)
 
             if response is None:
                 raise Exception("Qwen3Guard failed: empty response")
