@@ -1,5 +1,6 @@
 """Chat router — threads, messages, feedbacks, RAG ask."""
 
+import asyncio
 import json
 import re
 from typing import Any, Optional
@@ -15,6 +16,7 @@ from sqlalchemy.orm import Session
 from backend.models import Feedback, Message, Thread, User
 
 from ..configs.setup import get_backend_settings
+from ..core.runtime_settings import get_runtime_settings
 from ..core.security import get_current_user
 from ..database import get_db_session
 from ..schemas.chat import (
@@ -310,15 +312,18 @@ def ask(
     hybrid search (Qdrant + ES) → reranking → generation (vLLM → Ollama)."""
     thread = _get_user_thread(db, thread_id, current_user.id)
 
-    # Fetch recent history for context (up to 20 turns)
+    # Fetch recent history for context (last 3 messages only for low latency)
     history_msgs = (
         db.query(Message)
         .filter(Message.thread_id == thread_id)
-        .order_by(Message.created_at.asc())
-        .limit(20)
+        .order_by(Message.created_at.desc())
+        .limit(3)
         .all()
     )
-    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    history = [
+        {"role": m.role, "content": m.content}
+        for m in reversed(history_msgs)
+    ]
 
     # Persist user message immediately so it's visible in the UI
     user_msg = Message(thread_id=thread.id, role="user", content=body.content)
@@ -330,11 +335,12 @@ def ask(
     # ── Run the full RAG pipeline ─────────────────────────────────────────────
     try:
         from ..routers.rag import run_rag_pipeline
+        runtime = get_runtime_settings()
 
         result = run_rag_pipeline(
             question=body.content,
             history=history,
-            top_k=settings.top_k,
+            top_k=int(runtime.get("top_k", settings.top_k)),
             web_search_enabled=body.web_search_enabled,
         )
     except Exception as exc:
@@ -402,11 +408,14 @@ def ask_stream(
     history_msgs = (
         db.query(Message)
         .filter(Message.thread_id == thread_id)
-        .order_by(Message.created_at.asc())
-        .limit(20)
+        .order_by(Message.created_at.desc())
+        .limit(3)
         .all()
     )
-    history = [{"role": m.role, "content": m.content} for m in history_msgs]
+    history = [
+        {"role": m.role, "content": m.content}
+        for m in reversed(history_msgs)
+    ]
 
     user_msg = Message(thread_id=thread.id, role="user", content=body.content)
     db.add(user_msg)
@@ -421,14 +430,20 @@ def ask_stream(
         route = "medical"
         web_search_used = False
         citations: list[dict[str, Any]] = []
+        token_count = 0
 
         try:
+            logger.info(f"[STREAM_START] thread={thread_id}")
+            # Structured start event immediately to avoid first-message stream stall.
+            yield _to_sse("start", {"type": "start"})
+
             from ..routers.rag import run_rag_pipeline_stream
+            runtime = get_runtime_settings()
 
             stream_result = run_rag_pipeline_stream(
                 question=body.content,
                 history=history,
-                top_k=settings.top_k,
+                top_k=int(runtime.get("top_k", settings.top_k)),
                 web_search_enabled=body.web_search_enabled,
             )
             stream_iter = stream_result.get("answer_stream")
@@ -440,12 +455,17 @@ def ask_stream(
             if static_answer:
                 assistant_text = static_answer
                 for token in static_answer.split(" "):
-                    yield _to_sse("chunk", {"chunk": f"{token} "})
+                    chunk = f"{token} "
+                    token_count += 1
+                    yield _to_sse("token", {"type": "token", "data": chunk})
+                    yield _to_sse("chunk", {"chunk": chunk})
             elif stream_iter is not None:
                 for chunk in stream_iter:
                     if not chunk:
                         continue
                     assistant_text += chunk
+                    token_count += 1
+                    yield _to_sse("token", {"type": "token", "data": chunk})
                     yield _to_sse("chunk", {"chunk": chunk})
 
             assistant_text = assistant_text.strip()
@@ -478,22 +498,44 @@ def ask_stream(
             db.commit()
             db.refresh(assistant_msg)
 
+            try:
+                from ..services.brain import cache_final_response
+
+                cache_final_response(
+                    question=body.content,
+                    history=history,
+                    web_search_enabled=bool(body.web_search_enabled),
+                    payload={
+                        "answer": assistant_text,
+                        "citations": assistant_metadata.get("citations", []),
+                        "route": route,
+                        "web_search_used": web_search_used,
+                        "web_search_reason": "stream_done",
+                    },
+                )
+            except Exception:
+                pass
+
             done_payload = {
                 "route": route,
                 "citations": assistant_metadata.get("citations", []),
-                "user_message": MessageResponse.model_validate(user_msg).model_dump(
-                    mode="json",
-                    by_alias=True,
-                ),
                 "assistant_message": MessageResponse.model_validate(assistant_msg).model_dump(
                     mode="json",
                     by_alias=True,
                 ),
                 "done": True,
             }
+            yield _to_sse("end", {"type": "end"})
             yield _to_sse("done", done_payload)
+            logger.info(
+                f"[STREAM_END] thread={thread_id} route={route} tokens={token_count} chars={len(assistant_text)}"
+            )
+        except (GeneratorExit, asyncio.CancelledError):
+            logger.warning(f"[STREAM_ERROR] thread={thread_id} client_disconnected")
+            db.rollback()
+            return
         except Exception as exc:
-            logger.error(f"[ASK_STREAM] Failed: {exc}")
+            logger.error(f"[STREAM_ERROR] thread={thread_id} error={exc}")
             db.rollback()
             yield _to_sse(
                 "error",
