@@ -55,3 +55,47 @@ fastapi_exceptions_total = Counter(
     "Total number of exceptions",
     ["method", "path", "exception_type", "app_name"],
 )
+
+# RAG pipeline metrics
+rag_requests_total = Counter(
+    "rag_requests_total",
+    "Total number of RAG requests",
+)
+
+rag_errors_total = Counter(
+    "rag_errors_total",
+    "Total number of RAG pipeline errors",
+)
+
+rag_request_duration_seconds = Histogram(
+    "rag_request_duration_seconds",
+    "RAG total request latency in seconds",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0),
+)
+
+rag_llm_duration_seconds = Histogram(
+    "rag_llm_duration_seconds",
+    "LLM generation latency in seconds",
+    buckets=(0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, 20.0),
+)
+
+rag_retrieval_duration_seconds = Histogram(
+    "rag_retrieval_duration_seconds",
+    "Retrieval latency in seconds",
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0),
+)
+
+rag_cache_requests_total = Counter(
+    "rag_cache_requests_total",
+    "Total retrieval cache lookups",
+)
+
+rag_cache_hits_total = Counter(
+    "rag_cache_hits_total",
+    "Total retrieval cache hits",
+)
+
+rag_cache_misses_total = Counter(
+    "rag_cache_misses_total",
+    "Total retrieval cache misses",
+)
