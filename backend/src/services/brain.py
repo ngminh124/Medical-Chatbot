@@ -1,7 +1,11 @@
 import json
+import hashlib
 import logging
 import os
 import re
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Iterator, List, Optional
 
 import httpx
@@ -25,6 +29,189 @@ _DEFAULT_VLLM_URL = "http://localhost:7861"
 _DEFAULT_OLLAMA_URL = "http://localhost:11434"
 
 
+def _safe_int_env(name: str, default: int) -> int:
+    try:
+        raw = os.getenv(name, str(default))
+        if raw is None:
+            return default
+        raw = str(raw).strip()
+        if raw == "":
+            return default
+        return int(raw)
+    except Exception:
+        return default
+
+
+def _safe_float_env(name: str, default: float) -> float:
+    try:
+        raw = os.getenv(name, str(default))
+        if raw is None:
+            return default
+        raw = str(raw).strip()
+        if raw == "":
+            return default
+        return float(raw)
+    except Exception:
+        return default
+
+# ─── Local performance defaults ───────────────────────────────────────────────
+VECTOR_K = int(os.getenv("VECTOR_K", "8"))
+BM25_K = int(os.getenv("BM25_K", "8"))
+FINAL_K = int(os.getenv("FINAL_K", "4"))
+TOP_K = int(os.getenv("TOP_K", "5"))
+USE_RERANK = os.getenv("USE_RERANK", "false").strip().lower() in {"1", "true", "yes", "on"}
+
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "ollama").strip().lower()  # ollama | vllm
+LLM_MAX_TOKENS_CAP = max(512, min(_safe_int_env("LLM_MAX_TOKENS", 1024), 2048))
+LLM_TIMEOUT_SECONDS = max(5.0, min(_safe_float_env("LLM_TIMEOUT_SECONDS", 10.0), 20.0))
+LLM_STREAM_READ_TIMEOUT_SECONDS = max(30.0, _safe_float_env("LLM_STREAM_READ_TIMEOUT_SECONDS", 300.0))
+FAST_LOCAL_MODE = os.getenv("FAST_LOCAL_MODE", "true").strip().lower() in {"1", "true", "yes", "on"}
+LLM_TIMEOUT_FALLBACK = (
+    "Xin lỗi, hệ thống đang bận hoặc phản hồi chậm. "
+    "Vui lòng thử lại sau vài giây."
+)
+
+WEB_SEARCH_MAX_RESULTS = int(os.getenv("WEB_SEARCH_MAX_RESULTS", "2"))
+WEB_SEARCH_SNIPPET_MAX_CHARS = int(os.getenv("WEB_SEARCH_SNIPPET_MAX_CHARS", "220"))
+
+CACHE_TTL_SECONDS = int(os.getenv("CACHE_TTL_SECONDS", "3600"))
+ANSWER_CACHE_TTL_SECONDS = int(os.getenv("ANSWER_CACHE_TTL_SECONDS", "600"))
+RETRIEVAL_CACHE_TTL_SECONDS = int(os.getenv("RETRIEVAL_CACHE_TTL_SECONDS", "600"))
+_mem_cache: dict[str, tuple[float, object]] = {}
+_mem_cache_lock = threading.Lock()
+_ollama_model_cache: Optional[str] = None
+_ollama_model_lock = threading.Lock()
+_llm_provider_resolved: Optional[str] = None
+_provider_state_lock = threading.Lock()
+_provider_unavailable_until: dict[str, float] = {"vllm": 0.0, "ollama": 0.0}
+
+
+def get_active_llm_provider() -> str:
+    global _llm_provider_resolved
+    if _llm_provider_resolved is not None:
+        return _llm_provider_resolved
+    with _provider_state_lock:
+        if _llm_provider_resolved is None:
+            _llm_provider_resolved = "vllm" if LLM_PROVIDER == "vllm" else "ollama"
+        return _llm_provider_resolved
+
+
+def _provider_is_available(provider: str) -> bool:
+    return time.time() >= _provider_unavailable_until.get(provider, 0.0)
+
+
+def _mark_provider_unavailable(provider: str, cooldown_seconds: int = 60):
+    _provider_unavailable_until[provider] = time.time() + cooldown_seconds
+
+
+def _hash_key(prefix: str, *parts: str) -> str:
+    payload = "::".join(parts)
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _mem_get(key: str):
+    now = time.time()
+    with _mem_cache_lock:
+        item = _mem_cache.get(key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < now:
+            _mem_cache.pop(key, None)
+            return None
+        return value
+
+
+def _mem_set(key: str, value: object, ttl: int = CACHE_TTL_SECONDS):
+    with _mem_cache_lock:
+        _mem_cache[key] = (time.time() + ttl, value)
+
+
+def _cache_get_json(key: str):
+    cached = _mem_get(key)
+    if cached is not None:
+        return cached
+
+    try:
+        from ..core.cache import get_redis_client
+
+        redis_client = get_redis_client()
+        if redis_client is not None:
+            raw = redis_client.get(key)
+            if raw:
+                value = json.loads(raw)
+                _mem_set(key, value)
+                return value
+    except Exception:
+        pass
+    return None
+
+
+def _cache_set_json(key: str, value: object, ttl: int = CACHE_TTL_SECONDS):
+    _mem_set(key, value, ttl=ttl)
+    try:
+        from ..core.cache import get_redis_client
+
+        redis_client = get_redis_client()
+        if redis_client is not None:
+            redis_client.setex(key, ttl, json.dumps(value, ensure_ascii=False))
+    except Exception:
+        pass
+
+
+def build_final_response_cache_key(
+    question: str,
+    history: List[Dict[str, str]],
+    web_search_enabled: bool,
+) -> str:
+    recent = [m for m in history if m.get("role") in ("user", "assistant")][-3:]
+    context = "\n".join(f"{m.get('role','')}: {m.get('content','')[:500]}" for m in recent)
+    raw = "::".join(
+        [
+            question.strip().lower(),
+            context.strip().lower(),
+            "web" if web_search_enabled else "rag",
+        ]
+    )
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def get_cached_final_response(
+    question: str,
+    history: List[Dict[str, str]],
+    web_search_enabled: bool,
+) -> Optional[Dict[str, object]]:
+    key = build_final_response_cache_key(question, history, web_search_enabled)
+    try:
+        from ..core.cache import get_final_answer
+
+        cached = get_final_answer(key)
+    except Exception:
+        cached = _cache_get_json(key)
+    if isinstance(cached, dict):
+        return cached
+    return None
+
+
+def cache_final_response(
+    question: str,
+    history: List[Dict[str, str]],
+    web_search_enabled: bool,
+    payload: Dict[str, object],
+    ttl_seconds: int = ANSWER_CACHE_TTL_SECONDS,
+) -> None:
+    key = build_final_response_cache_key(question, history, web_search_enabled)
+    try:
+        from ..core.cache import cache_final_answer
+
+        ok = cache_final_answer(key, payload, ttl_seconds=ttl_seconds)
+        if not ok:
+            _cache_set_json(key, payload, ttl=ttl_seconds)
+    except Exception:
+        _cache_set_json(key, payload, ttl=ttl_seconds)
+
+
 def get_vllm_client():
     """Get remote vLLM client from config."""
     try:
@@ -34,7 +221,7 @@ def get_vllm_client():
         client = OpenAI(
             api_key=vllm_api_key,
             base_url=f"{vllm_url}/v1",
-            timeout=200.0,
+            timeout=LLM_TIMEOUT_SECONDS,
         )
         return client
     except Exception as e:
@@ -50,7 +237,7 @@ def qwen3_chat_complete(
 ) -> Optional[str]:
     """Generate chat completion using remote vLLM server with Qwen3-4B-Instruct-2507."""
     temperature = temperature if temperature is not None else 0.7
-    max_tokens = max_tokens if max_tokens is not None else 2048
+    max_tokens = _normalize_max_tokens(max_tokens)
 
     if model is None:
         model = get_generation_model()
@@ -84,16 +271,24 @@ def qwen3_chat_stream(
 ) -> Iterator[str]:
     """Stream chat completion tokens from remote vLLM (OpenAI-compatible)."""
     temperature = temperature if temperature is not None else 0.7
-    max_tokens = max_tokens if max_tokens is not None else 2048
+    max_tokens = _normalize_max_tokens(max_tokens)
 
     if model is None:
         model = get_generation_model()
 
-    client = get_vllm_client()
-    if not client:
-        return
+    vllm_url = os.getenv("VLLM_URL", _DEFAULT_VLLM_URL)
+    stream_client = OpenAI(
+        api_key=get_vllm_api_key() or "EMPTY",
+        base_url=f"{vllm_url}/v1",
+        timeout=httpx.Timeout(
+            connect=min(10.0, LLM_TIMEOUT_SECONDS),
+            read=LLM_STREAM_READ_TIMEOUT_SECONDS,
+            write=min(20.0, LLM_TIMEOUT_SECONDS),
+            pool=min(10.0, LLM_TIMEOUT_SECONDS),
+        ),
+    )
 
-    stream = client.chat.completions.create(
+    stream = stream_client.chat.completions.create(
         model=model,
         messages=messages,
         temperature=temperature,
@@ -125,6 +320,145 @@ def check_vllm_health() -> bool:
         return response.status_code == 200
     except Exception:
         return False
+
+
+def _truncate_doc_text(text: str, max_chars: int = 420) -> str:
+    cleaned = re.sub(r"\s+", " ", (text or "")).strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[:max_chars].rstrip() + "…"
+
+
+def _rrf_fuse(results_lists: List[List[Dict]], k: int = 60) -> List[Dict]:
+    fused_scores: Dict[str, float] = {}
+    result_data: Dict[str, Dict] = {}
+
+    for results in results_lists:
+        for rank, result in enumerate(results, start=1):
+            doc_id = str(result.get("chunk_id") or result.get("id") or rank)
+            fused_scores[doc_id] = fused_scores.get(doc_id, 0.0) + (1.0 / (k + rank))
+            if doc_id not in result_data:
+                result_data[doc_id] = result
+
+    sorted_ids = sorted(fused_scores.keys(), key=lambda x: fused_scores[x], reverse=True)
+    merged: List[Dict] = []
+    for doc_id in sorted_ids:
+        item = result_data[doc_id].copy()
+        item["rrf_score"] = fused_scores[doc_id]
+        merged.append(item)
+    return merged
+
+
+def hybrid_retrieve(query: str, retrieval_mode: str = "rag") -> List[Dict]:
+    """Fast hybrid retrieval with caching and local-friendly defaults.
+
+    vector_k=8, bm25_k=8, final_k=4 by default.
+    """
+    search_raw = "::".join(
+        [retrieval_mode, query.strip().lower(), str(VECTOR_K), str(BM25_K), str(FINAL_K)]
+    )
+    search_key = hashlib.sha256(search_raw.encode("utf-8")).hexdigest()
+    try:
+        from ..core.cache import get_search_results
+
+        cached = get_search_results(search_key)
+    except Exception:
+        cached = _cache_get_json(search_key)
+    if isinstance(cached, list):
+        return cached
+
+    def _vector_search() -> List[Dict]:
+        try:
+            from ..services.embedding import get_embedding_service
+            from ..core.vectorize import search_vectors_for_hybrid
+
+            emb_service = get_embedding_service()
+            qvec = emb_service.embed_query(query)
+            if not qvec:
+                return []
+            return search_vectors_for_hybrid(
+                query_vector=qvec,
+                top_k=VECTOR_K,
+                collection_name=settings.default_collection_name,
+            )
+        except Exception:
+            return []
+
+    def _bm25_search() -> List[Dict]:
+        try:
+            from ..services.elastic_search import get_elasticsearch_client
+
+            es_client = get_elasticsearch_client()
+            return es_client.search_bm25(query=query, top_k=BM25_K)
+        except Exception:
+            return []
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        vector_future = executor.submit(_vector_search)
+        bm25_future = executor.submit(_bm25_search)
+        vector_results = vector_future.result()
+        bm25_results = bm25_future.result()
+
+    if vector_results and bm25_results:
+        merged = _rrf_fuse([vector_results, bm25_results])
+    elif vector_results:
+        merged = vector_results
+    else:
+        merged = bm25_results
+
+    if USE_RERANK and merged:
+        try:
+            from ..services.rerank import Qwen3RerankerService
+
+            reranker = Qwen3RerankerService()
+            reranked_items, _ = reranker.rerank(query, merged, top_n=FINAL_K)
+            reranked_docs: List[Dict] = []
+            for item in reranked_items[:FINAL_K]:
+                idx = item.get("index", 0)
+                if 0 <= idx < len(merged):
+                    doc = merged[idx].copy()
+                    doc["relevance_score"] = item.get("relevance_score", 0.0)
+                    reranked_docs.append(doc)
+            if reranked_docs:
+                merged = reranked_docs
+        except Exception:
+            merged = merged[:FINAL_K]
+
+    final_docs = merged[:FINAL_K]
+    for doc in final_docs:
+        content = doc.get("content") or doc.get("text") or ""
+        doc["content"] = _truncate_doc_text(content)
+
+    try:
+        from ..core.cache import cache_search_results
+
+        ok = cache_search_results(search_key, final_docs, ttl_seconds=RETRIEVAL_CACHE_TTL_SECONDS)
+        if not ok:
+            _cache_set_json(search_key, final_docs, ttl=RETRIEVAL_CACHE_TTL_SECONDS)
+    except Exception:
+        _cache_set_json(search_key, final_docs, ttl=RETRIEVAL_CACHE_TTL_SECONDS)
+    return final_docs
+
+
+def _adaptive_token_limit(messages: List[Dict[str, str]], requested: int) -> int:
+    """Use requested cap but adapt down only for very long prompts."""
+    cap = max(256, min(LLM_MAX_TOKENS_CAP, 2048))
+    base = max(256, min(int(requested), cap))
+    total_chars = sum(len((m.get("content") or "")) for m in messages)
+    if total_chars > 14000:
+        return max(256, min(base, 512))
+    if total_chars > 10000:
+        return max(384, min(base, 768))
+    return base
+
+
+def _normalize_max_tokens(max_tokens: Optional[int]) -> int:
+    """Clamp user/config tokens into safe production range [256, 2048]."""
+    try:
+        requested = int(max_tokens) if max_tokens is not None else 512
+    except Exception:
+        requested = 512
+    return max(256, min(requested, 2048))
 
 
 def _resolve_ollama_model(ollama_url: str) -> Optional[str]:
@@ -175,11 +509,22 @@ def _resolve_ollama_model(ollama_url: str) -> Optional[str]:
         return None
 
 
+def _get_cached_ollama_model(ollama_url: str) -> Optional[str]:
+    global _ollama_model_cache
+    if _ollama_model_cache:
+        return _ollama_model_cache
+    with _ollama_model_lock:
+        if _ollama_model_cache:
+            return _ollama_model_cache
+        _ollama_model_cache = _resolve_ollama_model(ollama_url)
+        return _ollama_model_cache
+
+
 def ollama_chat_complete(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
 ) -> Optional[str]:
     """Generate chat completion via Ollama's /api/chat endpoint.
 
@@ -197,7 +542,7 @@ def ollama_chat_complete(
         "on",
     }
     if model is None:
-        model = _resolve_ollama_model(ollama_url)
+        model = _get_cached_ollama_model(ollama_url)
 
     if not model:
         log.error("[OLLAMA] Could not determine model name — set OLLAMA_MODEL env var")
@@ -216,9 +561,10 @@ def ollama_chat_complete(
                 "options": {
                     "temperature": temperature,
                     "num_predict": max_tokens,
+                    "top_p": 0.9,
                 },
             },
-            timeout=300.0,
+            timeout=LLM_TIMEOUT_SECONDS,
         )
         response.raise_for_status()
         body = response.json()
@@ -251,8 +597,8 @@ def ollama_chat_complete(
 def ollama_chat_stream(
     messages: List[Dict[str, str]],
     model: Optional[str] = None,
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
 ) -> Iterator[str]:
     """Stream chat completion chunks via Ollama /api/chat."""
     ollama_url = os.getenv("OLLAMA_URL", _DEFAULT_OLLAMA_URL)
@@ -263,7 +609,7 @@ def ollama_chat_stream(
         "on",
     }
     if model is None:
-        model = _resolve_ollama_model(ollama_url)
+        model = _get_cached_ollama_model(ollama_url)
 
     if not model:
         return
@@ -276,6 +622,7 @@ def ollama_chat_stream(
         "options": {
             "temperature": temperature,
             "num_predict": max_tokens,
+            "top_p": 0.9,
         },
     }
 
@@ -283,7 +630,12 @@ def ollama_chat_stream(
         "POST",
         f"{ollama_url}/api/chat",
         json=payload,
-        timeout=300.0,
+        timeout=httpx.Timeout(
+            connect=min(10.0, LLM_TIMEOUT_SECONDS),
+            read=LLM_STREAM_READ_TIMEOUT_SECONDS,
+            write=min(20.0, LLM_TIMEOUT_SECONDS),
+            pool=min(10.0, LLM_TIMEOUT_SECONDS),
+        ),
     ) as response:
         response.raise_for_status()
         for line in response.iter_lines():
@@ -305,152 +657,106 @@ def ollama_chat_stream(
 
 def get_response(
     messages: List[Dict[str, str]],
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
 ) -> Optional[str]:
-    """Unified generation entry-point with automatic vLLM → Ollama fallback.
+    """Single-provider generation with cache.
 
-    Fallback logic
-    --------------
-    Step 1 — vLLM (VLLM_URL, default http://localhost:7861)
-        Uses the OpenAI-compatible /v1/chat/completions endpoint.
-        On APIConnectionError or APITimeoutError the function continues to
-        Step 2 instead of raising, so callers never see a hard crash.
-
-    Step 2 — Ollama (OLLAMA_URL, default http://localhost:11434)
-        Falls back to Ollama's native /api/chat endpoint.
-        A ``logging`` message is emitted so infrastructure teams can detect
-        when the primary LLM service is degraded.
-
-    Environment Variables
-    ---------------------
-    VLLM_URL   : vLLM base URL  (default: http://localhost:7861)
-    OLLAMA_URL : Ollama base URL (default: http://localhost:11434)
-    MODEL_NAME : Override the model name for *both* services.
-                 Defaults to the value in models.yaml.
+    Provider is selected by `LLM_PROVIDER` env var (`ollama` | `vllm`).
+    No fallback chain to avoid extra latency.
     """
-    vllm_url = os.getenv("VLLM_URL", _DEFAULT_VLLM_URL)
-    model_name = os.getenv("MODEL_NAME") or get_generation_model()
+    safe_tokens = _normalize_max_tokens(max_tokens)
+    capped_tokens = _adaptive_token_limit(messages, safe_tokens)
+    logger.info(f"[LLM] max_tokens used: {capped_tokens}")
+    cache_basis = json.dumps(messages[-3:], ensure_ascii=False)
+    provider = get_active_llm_provider()
+    cache_key = _hash_key("answer", cache_basis, str(capped_tokens), f"{temperature:.2f}", provider)
+    cached = _cache_get_json(cache_key)
+    if isinstance(cached, str) and cached:
+        return cached
 
-    # ── Step 1: vLLM ─────────────────────────────────────────────────────────
-    try:
-        log.info("[GET_RESPONSE] Trying vLLM at %s (model: %s)", vllm_url, model_name)
-        client = OpenAI(
-            api_key=get_vllm_api_key() or "EMPTY",
-            base_url=f"{vllm_url}/v1",
-            timeout=60.0,
-        )
-        resp = client.chat.completions.create(
-            model=model_name,
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-            top_p=0.8,
-        )
-        content: str = resp.choices[0].message.content or ""
-        log.info("[GET_RESPONSE] vLLM responded successfully")
-        logger.success("[GET_RESPONSE] vLLM responded successfully")
-        return content
+    if not _provider_is_available(provider):
+        return LLM_TIMEOUT_FALLBACK
 
-    except (openai.APIConnectionError, openai.APITimeoutError) as e:
-        # Network-level failures → switch providers
-        log.warning(
-            "[GET_RESPONSE] vLLM unavailable (%s: %s) — switching to Ollama fallback",
-            type(e).__name__,
-            e,
-        )
-        logger.warning(f"[GET_RESPONSE] vLLM unreachable ({type(e).__name__}): {e}")
-
-    except (ConnectionError, TimeoutError) as e:
-        log.warning(
-            "[GET_RESPONSE] vLLM connection/timeout (%s: %s) — switching to Ollama fallback",
-            type(e).__name__,
-            e,
-        )
-        logger.warning(f"[GET_RESPONSE] vLLM connection/timeout: {e}")
-
-    except Exception as e:
-        error_str = str(e)
-        if "<!DOCTYPE html>" in error_str or "<html" in error_str:
-            error_str = "vLLM service is loading"
-        log.warning(
-            "[GET_RESPONSE] vLLM error (%s: %s) — switching to Ollama fallback",
-            type(e).__name__,
-            error_str,
-        )
-        logger.warning(f"[GET_RESPONSE] vLLM error: {error_str}")
-
-    # ── Step 2: Ollama fallback ───────────────────────────────────────────────
-    # Do NOT pass model_name here — it is a vLLM/HuggingFace model ID (e.g.
-    # "Qwen/Qwen3-4B") that Ollama won't recognise.  Passing model=None lets
-    # _resolve_ollama_model() do the correct lookup (OLLAMA_MODEL env var →
-    # MODEL_NAME env var → /api/tags auto-detect → YAML last resort).
-    log.info("[GET_RESPONSE] Attempting Ollama fallback (auto-resolving Ollama model)")
-    logger.info("[GET_RESPONSE] Attempting Ollama fallback...")
-
-    result = ollama_chat_complete(
-        messages=messages,
-        model=None,
-        temperature=temperature,
-        max_tokens=max_tokens,
-    )
-
-    if result:
-        log.info("[GET_RESPONSE] Ollama responded successfully")
-        logger.success("[GET_RESPONSE] Ollama responded successfully")
-    elif result is not None:
-        # Empty string: Ollama answered but content was blank
-        # (thinking model exhausted token budget — caller should retry with
-        # a larger max_tokens or use /no_think in the system prompt).
-        log.warning("[GET_RESPONSE] Ollama returned empty content (thinking model token exhaustion?)")
-        logger.warning("[GET_RESPONSE] Ollama returned empty content — consider increasing max_tokens")
+    if provider == "vllm":
+        vllm_url = os.getenv("VLLM_URL", _DEFAULT_VLLM_URL)
+        model_name = os.getenv("MODEL_NAME") or get_generation_model()
+        try:
+            client = OpenAI(
+                api_key=get_vllm_api_key() or "EMPTY",
+                base_url=f"{vllm_url}/v1",
+                timeout=LLM_TIMEOUT_SECONDS,
+            )
+            resp = client.chat.completions.create(
+                model=model_name,
+                messages=messages,
+                temperature=temperature,
+                max_tokens=capped_tokens,
+                top_p=0.9,
+            )
+            output = (resp.choices[0].message.content or "").strip()
+        except Exception:
+            _mark_provider_unavailable("vllm")
+            return LLM_TIMEOUT_FALLBACK
     else:
-        log.error("[GET_RESPONSE] Both vLLM and Ollama failed to produce a response")
-        logger.error("[GET_RESPONSE] Both vLLM and Ollama failed")
+        try:
+            output = (ollama_chat_complete(
+                messages=messages,
+                model=None,
+                temperature=temperature,
+                max_tokens=capped_tokens,
+            ) or "").strip()
+        except Exception:
+            _mark_provider_unavailable("ollama")
+            return LLM_TIMEOUT_FALLBACK
 
-    return result
+    if output:
+        _cache_set_json(cache_key, output, ttl=ANSWER_CACHE_TTL_SECONDS)
+    return output or LLM_TIMEOUT_FALLBACK
 
 
 def get_response_stream(
     messages: List[Dict[str, str]],
-    temperature: float = 0.7,
-    max_tokens: int = 2048,
+    temperature: float = 0.3,
+    max_tokens: int = 512,
 ) -> Iterator[str]:
-    """Unified streaming generation with vLLM → Ollama fallback."""
-    emitted_any = False
+    """Single-provider streaming generation (no fallback chain)."""
+    safe_tokens = _normalize_max_tokens(max_tokens)
+    capped_tokens = _adaptive_token_limit(messages, safe_tokens)
+    logger.info(f"[LLM] max_tokens used: {capped_tokens}")
 
-    # 1) vLLM stream first
-    try:
-        for token in qwen3_chat_stream(
-            messages=messages,
-            temperature=temperature,
-            max_tokens=max_tokens,
-        ):
-            emitted_any = True
-            yield token
-        if emitted_any:
+    provider = get_active_llm_provider()
+    if not _provider_is_available(provider):
+        yield "Xin lỗi, dịch vụ tạo phản hồi đang tạm thời không khả dụng."
+        return
+
+    if provider == "vllm":
+        try:
+            for token in qwen3_chat_stream(
+                messages=messages,
+                temperature=temperature,
+                max_tokens=capped_tokens,
+            ):
+                if token:
+                    yield token
             return
-    except Exception as e:
-        logger.warning(f"[GEN] vLLM stream failed: {e}")
-        if emitted_any:
+        except Exception:
+            _mark_provider_unavailable("vllm")
+            yield "Xin lỗi, dịch vụ tạo phản hồi đang tạm thời không khả dụng."
             return
 
-    # 2) fallback Ollama stream
     try:
         for token in ollama_chat_stream(
             messages=messages,
             temperature=temperature,
-            max_tokens=max_tokens,
+            max_tokens=capped_tokens,
         ):
-            emitted_any = True
-            yield token
-        if emitted_any:
-            return
-    except Exception as e:
-        logger.error(f"[GEN] Ollama stream failed: {e}")
-
-    if not emitted_any:
-        yield "Xin lỗi, hệ thống tạo phản hồi đang gặp sự cố. Vui lòng thử lại sau vài giây."
+            if token:
+                yield token
+        return
+    except Exception:
+        _mark_provider_unavailable("ollama")
+        yield "Xin lỗi, dịch vụ tạo phản hồi đang tạm thời không khả dụng."
 
 
 def get_openai_client():
@@ -482,59 +788,41 @@ def generate_conversation_text(conversations):
         raise
 
 
-def enhance_query_quality(history, message):
-    """Enhance user query quality by rephrasing with conversation context."""
-    try:
-        history_messages = generate_conversation_text(history)
-        enhanced_prompt = settings.rewrite_prompt.format(
-            history_messages=history_messages, message=message
-        )
-
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert in rephrasing user questions.",
-            },
-            {"role": "user", "content": enhanced_prompt},
-        ]
-
-        enhanced_query = qwen3_chat_complete(messages)
-        return enhanced_query if enhanced_query else message
-    except Exception as e:
-        logger.error(f"[GEN] Query enhancement failed: {e}")
-        return message
-
-
 def detect_route(history, message):
     """Detect conversation route (medical vs general)."""
-    try:
-        user_prompt = settings.intent_detection_prompt.format(
-            history=history,
-            message=message,
-        )
+    text = (message or "").strip().lower()
+    if not text:
+        return "general"
 
-        messages = [
-            {
-                "role": "system",
-                "content": "You are an expert in classifying user intents.",
-            },
-            {"role": "user", "content": user_prompt},
-        ]
-
-        route = qwen3_chat_complete(messages)
-        return route if route else "medical"
-    except Exception as e:
-        logger.error(f"[GEN] Route detection failed: {e}")
-        return "medical"
+    medical_keywords = (
+        "bệnh",
+        "triệu chứng",
+        "thuốc",
+        "điều trị",
+        "xét nghiệm",
+        "chẩn đoán",
+        "đau",
+        "sốt",
+        "ho",
+        "viêm",
+        "tim",
+        "phổi",
+        "huyết áp",
+        "tiểu đường",
+        "covid",
+        "ung thư",
+        "nhi khoa",
+    )
+    return "medical" if any(k in text for k in medical_keywords) else "general"
 
 
 def get_tavily_agent_answer(messages):
     """Backward-compatible wrapper returning only answer text."""
-    result = get_tavily_agent_answer_with_sources(messages)
+    result = get_tavily_agent_answer_with_sources(messages, use_web_search=True)
     return result.get("answer")
 
 
-def get_tavily_agent_answer_with_sources(messages):
+def get_tavily_agent_answer_with_sources(messages, use_web_search: bool = True):
     """Generate answer using Tavily web search with intelligent context management.
     
     Flow:
@@ -580,8 +868,77 @@ def get_tavily_agent_answer_with_sources(messages):
                 "query": "",
             }
 
+        # Smart routing: when web search is OFF, run local RAG retrieval only.
+        if not use_web_search:
+            docs = hybrid_retrieve(search_query, retrieval_mode="rag")
+            context_blocks: List[str] = []
+            for i, doc in enumerate(docs[:FINAL_K], start=1):
+                title = doc.get("title") or doc.get("file_name") or f"Tài liệu {i}"
+                snippet = _truncate_doc_text(doc.get("content") or doc.get("text") or "")
+                if snippet:
+                    context_blocks.append(f"[{i}] {title}: {snippet}")
+
+            compact_context = "\n".join(context_blocks)
+            local_messages = [
+                {
+                    "role": "system",
+                    "content": "Bạn là trợ lý y tế Việt Nam. Trả lời ngắn gọn, chính xác, dễ hiểu.",
+                },
+                {
+                    "role": "user",
+                    "content": (
+                        f"Ngữ cảnh tài liệu:\n{compact_context}\n\n"
+                        f"Câu hỏi: {search_query}\n"
+                        "Nếu ngữ cảnh chưa đủ, hãy nói rõ giới hạn thông tin."
+                    ),
+                },
+            ]
+            local_answer = get_response(
+                messages=local_messages,
+                temperature=0.4,
+                max_tokens=min(LLM_MAX_TOKENS_CAP, 512),
+            )
+            return {
+                "answer": local_answer or "Xin lỗi, không thể tạo câu trả lời từ dữ liệu nội bộ.",
+                "citations": [],
+                "query": search_query,
+            }
+
         # Search web via Tavily
-        observation, web_citations = tavily_search(search_query, return_results=True)
+        cached_web_key = _hash_key("search", "web", search_query.strip().lower(), str(WEB_SEARCH_MAX_RESULTS))
+        cached_web = _cache_get_json(cached_web_key)
+        if isinstance(cached_web, dict):
+            observation = str(cached_web.get("observation") or "")
+            web_citations = list(cached_web.get("citations") or [])
+        else:
+            _observation, web_citations = tavily_search(
+                search_query,
+                max_results=WEB_SEARCH_MAX_RESULTS,
+                return_results=True,
+            )
+
+            # keep only short snippets for latency + prompt budget
+            compact_citations: List[Dict[str, str]] = []
+            for item in web_citations[:WEB_SEARCH_MAX_RESULTS]:
+                snippet = _truncate_doc_text(item.get("snippet") or item.get("content") or "", WEB_SEARCH_SNIPPET_MAX_CHARS)
+                compact_citations.append(
+                    {
+                        **item,
+                        "snippet": snippet,
+                        "content": snippet,
+                    }
+                )
+            web_citations = compact_citations
+
+            observation = "\n".join(
+                f"- {c.get('title', 'Nguồn web')}: {c.get('snippet', '')} ({c.get('url', '')})"
+                for c in web_citations
+            )
+            _cache_set_json(
+                cached_web_key,
+                {"observation": observation, "citations": web_citations},
+                ttl=CACHE_TTL_SECONDS,
+            )
 
         # Keep only recent messages to avoid token overflow
         recent_messages = _truncate_messages(messages, max_messages=6)
@@ -611,8 +968,8 @@ def get_tavily_agent_answer_with_sources(messages):
         # Use unified generation path (vLLM -> Ollama fallback)
         final_response = get_response(
             messages=enhanced_messages,
-            temperature=0.7,
-            max_tokens=1536,
+            temperature=0.5,
+            max_tokens=min(LLM_MAX_TOKENS_CAP, 512),
         )
 
         if not final_response:
