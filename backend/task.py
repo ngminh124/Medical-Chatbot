@@ -11,8 +11,7 @@ from .configs.logging_config import get_rag_logger
 from .configs.setup import get_backend_settings
 from .core.guardrails import get_guardrails_service
 from .core.vectorize import search_vectors, upsert_points
-from .services.brain import (detect_route, enhance_query_quality,
-                             get_tavily_agent_answer, qwen3_chat_complete)
+from .services.brain import detect_route, get_response
 from .services.chunking import fixed_semantic_chunking
 from .services.embedding import get_embedding_service
 from .services.rerank import get_qwen3_reranker
@@ -252,7 +251,7 @@ def bot_route_answer_message(history, question, system_prompt=None):
             history, question, system_prompt=system_prompt, skip_input_validation=True
         )
     elif route == "general":
-        response = qwen3_chat_complete(
+        response = get_response(
             messages=[
                 {
                     "role": "system",
@@ -262,10 +261,10 @@ def bot_route_answer_message(history, question, system_prompt=None):
             ]
             + history
             + [{"role": "user", "content": question}],
-            temperature=0.7,
-            max_tokens=1536,
+            temperature=0.3,
+            max_tokens=512,
         )
-        if response is None:
+        if not response:
             return "Xin lỗi, hệ thống đang quá tải. Vui lòng thử lại sau."
         return response
 
@@ -279,261 +278,22 @@ def bot_route_answer_message(history, question, system_prompt=None):
 def rag_qa_task(
     self, history, question, system_prompt=None, skip_input_validation=False
 ):
-    """
-    RAG QA task with Qwen3Guard input/output validation.
-
-    Flow:
-    1. Validate user input with Qwen3Guard (if not already validated)
-    2. If valid, proceed with RAG pipeline
-    3. Generate response with Qwen3
-    4. Validate response with Qwen3Guard
-    5. If invalid, regenerate with feedback (max 2 retries)
-    6. Return final validated response
-
-    Args:
-        history: Conversation history
-        question: User question
-        system_prompt: Custom system prompt (optional)
-        skip_input_validation: Skip input validation if already done in bot_route_answer_message
-    """
+    """RAG task delegates to the main RAG pipeline (single source of truth)."""
     import time
 
-    from .core.model_config import get_generation_model
-
     request_start = time.time()
-
     try:
-        guardrails = get_guardrails_service()
+        from .src.routers.rag import run_rag_pipeline
 
-        # ============================================
-        # STEP 1: INPUT VALIDATION (Qwen3Guard)
-        # Skip if already validated in bot_route_answer_message
-        # ============================================
-        if not skip_input_validation:
-            is_valid_input, violation_category, input_metadata = (
-                guardrails.validate_query(question)
-            )
-
-            rag_log.log_guardrails_input(
-                is_valid=is_valid_input,
-                category=violation_category,
-                severity=input_metadata.get("severity") if input_metadata else None,
-            )
-
-            if not is_valid_input:
-                rejection_message = guardrails.get_rejection_message(
-                    violation_category, language="vi"
-                )
-                rag_log.log_request_complete(request_start, success=False)
-                return rejection_message
-
-        # ============================================
-        # STEP 2: QUERY ENHANCEMENT
-        # ============================================
-        new_question = enhance_query_quality(history, question)
-        rag_log.log_query_enhancement(question, new_question)
-
-        # ============================================
-        # STEP 3: EMBEDDING GENERATION
-        # ============================================
-        embedding_service = get_embedding_service()
-        question_embedding = embedding_service.embed_query(new_question, use_cache=True)
-
-        if not question_embedding:
-            rag_log.log_embedding(success=False, is_query=True)
-            rag_log.log_request_complete(request_start, success=False)
-            return "Xin lỗi, không thể xử lý câu hỏi của bạn lúc này."
-
-        rag_log.log_embedding(
-            success=True,
-            dimension=len(question_embedding),
-            is_query=True,
-            cache_hit=False,  # Cache status logged in embedding service
+        result = run_rag_pipeline(
+            question=question,
+            history=history or [],
+            top_k=int(settings.top_k),
+            web_search_enabled=False,
         )
-
-        # ============================================
-        # STEP 4: HYBRID RETRIEVAL
-        # ============================================
-        from .core.hybrid_search import hybrid_search
-        from .core.vectorize import search_vectors_for_hybrid
-        from .services.elasticsearch import get_elasticsearch_client
-
-        def vector_search_fn(query, top_k, doc_type_filter=None, source_filter=None):
-            return search_vectors_for_hybrid(
-                query_vector=question_embedding,
-                top_k=top_k,
-                collection_name=settings.default_collection_name,
-                doc_type_filter=doc_type_filter,
-                source_filter=source_filter,
-            )
-
-        def keyword_search_fn(query, top_k, doc_type_filter=None, source_filter=None):
-            es_client = get_elasticsearch_client()
-            return es_client.search_bm25(
-                query=query,
-                top_k=top_k,
-                doc_type_filter=doc_type_filter,
-                source_filter=source_filter,
-            )
-
-        relevant_docs = hybrid_search(
-            query=new_question,
-            vector_search_fn=vector_search_fn,
-            keyword_search_fn=keyword_search_fn,
-            top_k=settings.top_k,
-            rrf_k=60,
-            use_cache=True,
-        )
-
-        # ============================================
-        # STEP 5: RERANKING
-        # ============================================
-        reranker = get_qwen3_reranker()
-        if relevant_docs:
-            reranked_results, rerank_context = reranker.rerank(
-                new_question, relevant_docs, top_n=5
-            )
-            if reranked_results:
-                rag_log.log_rerank_results(reranked_results, top_n=5)
-        else:
-            reranked_results, rerank_context = None, None
-            logger.warning("[RAG] ⚠️ No documents retrieved")
-
-        # Check confidence for web search fallback
-        use_web_search = False
-        if not reranked_results or (
-            reranked_results and reranked_results[0]["relevance_score"] < 0.5
-        ):
-            best_score = (
-                reranked_results[0]["relevance_score"] if reranked_results else 0
-            )
-            logger.info(
-                f"[RAG] 🌐 Low confidence (score={best_score:.3f}), using web search"
-            )
-            use_web_search = True
-
-        formatted_context = (
-            rerank_context
-            if reranked_results
-            else "Can't find relevant documents from knowledge base."
-        )
-
-        # ============================================
-        # STEP 6: HISTORY SUMMARIZATION
-        # ============================================
-        from .services.summarizer import (calculate_messages_tokens,
-                                          summarize_old_messages)
-
-        prompt = system_prompt or settings.system_prompt
-        messages = [{"role": "system", "content": prompt}]
-        history_with_system = messages + history
-
-        original_count = len(history_with_system)
-        original_tokens = calculate_messages_tokens(history_with_system)
-
-        optimized_history = summarize_old_messages(
-            history_with_system, target_tokens=2000
-        )
-
-        new_tokens = calculate_messages_tokens(optimized_history)
-        rag_log.log_history_summary(
-            original_count=original_count,
-            summarized_count=len(optimized_history),
-            original_tokens=original_tokens,
-            new_tokens=new_tokens,
-        )
-
-        messages = optimized_history
-
-        # ============================================
-        # STEP 7: RESPONSE GENERATION WITH VALIDATION
-        # ============================================
-        max_retries = 0  # Disabled for testing
-        retry_count = 0
-        final_response = None
-        generation_model = get_generation_model()
-
-        while retry_count <= max_retries:
-            if self.request.id and self.AsyncResult(self.request.id).state == "REVOKED":
-                logger.warning("[RAG] Task cancelled by user")
-                return "Yêu cầu đã bị hủy bởi người dùng."
-
-            if use_web_search:
-                user_message = {
-                    "role": "user",
-                    "content": f"RAG Context (can be insufficient):\n{formatted_context}\n\nQuestion: {new_question}\n\nNote: Information in RAG context may be insufficient. Please search for additional information from the internet and ALWAYS provide the source with the full URL.",
-                }
-                if retry_count > 0 and "feedback" in locals():
-                    user_message[
-                        "content"
-                    ] += f"\n\n⚠️ IMPORTANT FEEDBACK FROM SAFETY CHECK:\n{feedback}\n\nPlease revise your response accordingly."
-
-                messages_with_query = messages + [user_message]
-                response = get_tavily_agent_answer(messages_with_query)
-            else:
-                user_message = {
-                    "role": "user",
-                    "content": settings.rag_prompt.format(
-                        context=formatted_context, question=new_question
-                    ),
-                }
-                if retry_count > 0 and "feedback" in locals():
-                    user_message[
-                        "content"
-                    ] += f"\n\n⚠️ IMPORTANT FEEDBACK FROM SAFETY CHECK:\n{feedback}\n\nPlease revise your response accordingly."
-
-                messages_with_query = messages + [user_message]
-                response = qwen3_chat_complete(
-                    messages=messages_with_query,
-                    temperature=0.7,
-                    max_tokens=1536,
-                )
-
-                if not response:
-                    rag_log.log_generation(success=False, use_web_search=use_web_search)
-                    rag_log.log_request_complete(request_start, success=False)
-                    return "Xin lỗi, không thể tạo câu trả lời lúc này."
-
-            rag_log.log_generation(
-                success=True,
-                response_length=len(response) if response else 0,
-                model=generation_model,
-                use_web_search=use_web_search,
-            )
-
-            # Output validation
-            is_valid_output, output_violation, output_metadata = (
-                guardrails.validate_response(
-                    response, question, max_retries=max_retries
-                )
-            )
-
-            rag_log.log_guardrails_output(
-                is_valid=is_valid_output,
-                category=output_violation,
-                severity=output_metadata.get("severity") if output_metadata else None,
-                attempt=retry_count + 1,
-            )
-
-            if is_valid_output:
-                final_response = response
-                break
-            else:
-                if retry_count < max_retries:
-                    feedback = output_metadata.get(
-                        "feedback",
-                        "Please revise your response to be safer and more appropriate.",
-                    )
-                    retry_count += 1
-                else:
-                    final_response = (
-                        "Xin lỗi, tôi không thể tạo ra câu trả lời phù hợp cho câu hỏi này. "
-                        "Vui lòng thử lại với cách diễn đạt khác hoặc liên hệ với bác sĩ để được tư vấn trực tiếp."
-                    )
-                    break
-
+        answer = (result or {}).get("answer") or "Xin lỗi, không thể tạo câu trả lời lúc này."
         rag_log.log_request_complete(request_start, success=True)
-        return final_response
+        return answer
 
     except SoftTimeLimitExceeded:
         logger.error("[RAG] Task exceeded soft time limit (180s)")
