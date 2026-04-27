@@ -77,3 +77,10 @@ def get_current_user(
     if not user or user.status != "active":
         raise HTTPException(status_code=401, detail="Người dùng không tồn tại hoặc bị vô hiệu hóa")
     return user
+
+
+def get_current_admin(current_user=Depends(get_current_user)):
+    role = (getattr(current_user, "type", None) or "").lower()
+    if role != "admin":
+        raise HTTPException(status_code=403, detail="Chỉ ADMIN mới có quyền truy cập")
+    return current_user
