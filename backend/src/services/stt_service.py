@@ -4,6 +4,7 @@ Provides audio transcription with caching for Vietnamese Medical RAG system
 """
 
 import hashlib
+import threading
 import time
 from typing import Optional
 
@@ -267,14 +268,24 @@ class SttService:
 
 # Global STT service instance
 _stt_service: Optional[SttService] = None
+_stt_service_lock = threading.Lock()
+_stt_init_kwargs = {
+    "model_name": "turbo",
+    "device": "cuda",
+    "compute_type": "float16",
+}
 
 
 def get_stt_service() -> SttService:
     """Get or create global STT service instance"""
     global _stt_service
     if _stt_service is None:
-        # Configuration will be loaded from models.yaml
-        _stt_service = SttService()
+        with _stt_service_lock:
+            if _stt_service is None:
+                _stt_service = SttService(**_stt_init_kwargs)
+                logger.info("[STT] Lazy initialized on first request")
+    else:
+        logger.debug("[STT] Reused singleton instance")
     return _stt_service
 
 
@@ -291,12 +302,13 @@ def initialize_stt_service(
         device: Device for inference
         compute_type: Computation type
     """
-    global _stt_service
-    _stt_service = SttService(
-        model_name=model_name, device=device, compute_type=compute_type
-    )
-    _stt_service.load_model()
-    logger.info("[STT] Service initialized")
+    global _stt_init_kwargs
+    _stt_init_kwargs = {
+        "model_name": model_name,
+        "device": device,
+        "compute_type": compute_type,
+    }
+    logger.info("[STT] Deferred initialization configured (lazy)")
 
 
 async def close_stt_service():
@@ -304,3 +316,4 @@ async def close_stt_service():
     global _stt_service
     if _stt_service is not None:
         await _stt_service.close()
+        _stt_service = None

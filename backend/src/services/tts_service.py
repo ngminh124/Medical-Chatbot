@@ -5,6 +5,7 @@ Supports ElevenLabs API for high-quality voice synthesis
 
 import base64
 import hashlib
+import threading
 import time
 from typing import Optional
 
@@ -277,13 +278,20 @@ class TtsService:
 
 # Global TTS service instance
 _tts_service: Optional[TtsService] = None
+_tts_service_lock = threading.Lock()
+_tts_init_kwargs: dict = {}
 
 
 def get_tts_service() -> TtsService:
     """Get or create global TTS service instance"""
     global _tts_service
     if _tts_service is None:
-        _tts_service = TtsService()
+        with _tts_service_lock:
+            if _tts_service is None:
+                _tts_service = TtsService(**_tts_init_kwargs)
+                logger.info("[TTS] Lazy initialized on first request")
+    else:
+        logger.debug("[TTS] Reused singleton instance")
     return _tts_service
 
 
@@ -295,15 +303,15 @@ def initialize_tts_service(api_key: str = None, voice_id: str = None):
         api_key: ElevenLabs API key
         voice_id: Default voice ID
     """
-    global _tts_service
+    global _tts_init_kwargs
     kwargs = {}
     if api_key:
         kwargs["api_key"] = api_key
     if voice_id:
         kwargs["voice_id"] = voice_id
 
-    _tts_service = TtsService(**kwargs)
-    logger.info("[TTS] Service initialized")
+    _tts_init_kwargs = kwargs
+    logger.info("[TTS] Deferred initialization configured (lazy)")
 
 
 async def close_tts_service():
@@ -311,3 +319,4 @@ async def close_tts_service():
     global _tts_service
     if _tts_service is not None:
         await _tts_service.close()
+        _tts_service = None
