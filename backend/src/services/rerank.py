@@ -42,12 +42,16 @@ class Qwen3RerankerService:
         self.huggingface_model = get_reranking_model()
         self.task_instruction = task_instruction or self.DEFAULT_TASK_INSTRUCTION
         self.timeout = float(settings.service_http_timeout)
-        self.max_retries = max(0, int(settings.service_http_retries))
+        self.max_retries = 0
         self.backoff_base = max(0.1, float(settings.service_http_backoff_seconds))
         self.client = httpx.Client(
             timeout=self.timeout,
             limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
         )
+        self._failures = 0
+        self._down_until = 0.0
+        self._down_ttl_seconds = 60
+        self._failure_threshold = 3
 
     def rerank(
         self,
@@ -58,6 +62,7 @@ class Qwen3RerankerService:
     ) -> Tuple[List[Dict[str, Any]], str]:
         """Rerank documents using Qwen3-Reranker-0.6B."""
         instruction = task_instruction or self.task_instruction
+        top_n = max(1, min(int(top_n), 4, len(documents)))
 
         try:
             reranked_results = self._rerank_with_local(
@@ -83,6 +88,9 @@ class Qwen3RerankerService:
         instruction: str,
     ) -> List[Dict[str, Any]]:
         """Call local GPU service for Qwen3-Reranker-0.6B inference."""
+        if time.time() < self._down_until:
+            raise RuntimeError("Reranker service is temporarily DOWN (circuit breaker)")
+
         # Truncate to avoid GPU OOM on large medical documents
         MAX_DOC_CHARS = 512
         doc_texts = [
@@ -109,6 +117,7 @@ class Qwen3RerankerService:
                     json=payload,
                 )
                 if response.status_code == 200:
+                    self._failures = 0
                     break
 
                 if response.status_code < 500 and response.status_code != 429:
@@ -119,14 +128,17 @@ class Qwen3RerankerService:
                 )
             except Exception as e:
                 last_error = e
+                self._failures += 1
+                if self._failures > self._failure_threshold:
+                    self._down_until = time.time() + self._down_ttl_seconds
+                    logger.warning(
+                        f"[RERANK][CB] Service marked DOWN for {self._down_ttl_seconds}s"
+                    )
                 if attempt >= self.max_retries:
                     raise
-                sleep_s = self.backoff_base * (2**attempt)
                 logger.warning(
-                    f"[RERANK] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}. "
-                    f"Retrying in {sleep_s:.1f}s"
+                    f"[RERANK] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}."
                 )
-                time.sleep(sleep_s)
 
         if response is None:
             raise Exception(f"Reranking failed: {last_error}")
