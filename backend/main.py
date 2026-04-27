@@ -1,4 +1,6 @@
 import time
+import logging
+from pathlib import Path
 from typing import List, Optional
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -19,11 +21,51 @@ from .src.core import metrics  # noqa: F401
 from .src.core.vectorize import create_collection
 from .models import init_db
 # Import routers
-from .src.routers import audio, documents, health, models, rag, stt, tts
+from .src.routers import audio, documents, health, models, rag
 from .src.routers.auth import router as auth_router
+from .src.routers.auth import ensure_default_admin
+from .src.routers.admin import router as admin_router
 from .src.routers.chat import router as chat_router
+from .src.database import SessionLocal
 
 settings = get_backend_settings()
+
+_log_dir = Path(__file__).resolve().parent / "logs"
+_log_dir.mkdir(parents=True, exist_ok=True)
+try:
+    logger.add(
+        str(_log_dir / "app.log"),
+        rotation="50 MB",
+        retention="7 days",
+        enqueue=True,
+        backtrace=False,
+        diagnose=False,
+    )
+except Exception as e:
+    logger.warning(f"⚠️  File logging disabled (permission/error): {e}")
+
+
+class _UvicornAccessFilter(logging.Filter):
+    """Drop high-frequency metrics/admin-metrics access logs."""
+
+    NOISY_PATH_PREFIXES = (
+        "/metrics",
+        "/v1/admin/metrics",
+    )
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            args = getattr(record, "args", ())
+            if isinstance(args, tuple) and len(args) >= 3:
+                path = str(args[2])
+                if any(path.startswith(prefix) for prefix in self.NOISY_PATH_PREFIXES):
+                    return False
+        except Exception:
+            return True
+        return True
+
+
+logging.getLogger("uvicorn.access").addFilter(_UvicornAccessFilter())
 
 # Configure OpenTelemetry tracer
 tracer_provider = TracerProvider()
@@ -164,6 +206,8 @@ app.mount("/metrics", metrics_app)
 def on_startup():
     try:
         init_db()
+        with SessionLocal() as db:
+            ensure_default_admin(db)
 
         try:
             create_collection()
@@ -183,38 +227,15 @@ def on_startup():
             except Exception as e:
                 logger.warning(f"⚠️  Failed to load local models: {e}")
 
-        # Initialize STT service
+        logger.info("⏭️  STT/TTS eager startup init disabled (lazy init on first request)")
+
         try:
-            from .src.core.model_config import load_model_config
-            from .src.services.stt import initialize_stt_service
+            from .src.services.elastic_search import warmup_elasticsearch_client
 
-            config = load_model_config()
-            stt_config = config.get("models", {}).get("stt", {})
-
-            # STT now routes to GPU service, just initialize the proxy
-            initialize_stt_service(
-                model_name=stt_config.get("active", "turbo"),
-                device=stt_config.get("device", "cuda"),
-                compute_type=stt_config.get("compute_type", "float16"),
-            )
-            logger.info("✅ STT service initialized (routes to GPU service)")
+            warmup_elasticsearch_client()
+            logger.info("✅ Elasticsearch singleton warmed up")
         except Exception as e:
-            logger.warning(
-                f"⚠️  Failed to initialize STT service: {e}"
-            )  # Initialize TTS service
-        try:
-            from .src.services.tts import initialize_tts_service
-
-            api_key = settings.elevenlabs_api_key
-            voice_id = settings.elevenlabs_voice_id
-
-            if api_key:
-                initialize_tts_service(api_key=api_key, voice_id=voice_id)
-                logger.success("✅ TTS service initialized successfully")
-            else:
-                logger.warning("⚠️  ElevenLabs API key not configured, TTS disabled")
-        except Exception as e:
-            logger.warning(f"⚠️  Failed to initialize TTS service: {e}")
+            logger.warning(f"⚠️  Failed to warm up Elasticsearch client: {e}")
 
         try:
             from .src.services.brain import get_response
@@ -266,8 +287,8 @@ def on_startup():
 async def on_shutdown():
     """Graceful shutdown for shared async clients."""
     try:
-        from .src.services.stt import close_stt_service
-        from .src.services.tts import close_tts_service
+        from .src.services.stt_service import close_stt_service
+        from .src.services.tts_service import close_tts_service
 
         await close_stt_service()
         await close_tts_service()
@@ -281,13 +302,14 @@ app.include_router(health.router)
 app.include_router(rag.router)
 app.include_router(models.router)
 app.include_router(audio.router)
+app.include_router(audio.stt_router)
+app.include_router(audio.tts_router)
 app.include_router(documents.router)
-app.include_router(stt.router)
-app.include_router(tts.router)
 
 # Auth & Chat routers
 app.include_router(auth_router)
 app.include_router(chat_router)
+app.include_router(admin_router)
 
 
 @app.get("/")
@@ -299,6 +321,7 @@ def read_root():
         "routers": [
             "/v1/auth",
             "/v1/chat",
+            "/v1/admin",
             "/v1/health",
             "/v1/rag",
             "/v1/models",
@@ -335,7 +358,7 @@ class ChatRequest(BaseModel):
         description="Conversation history in OpenAI message format",
     )
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    max_tokens: int = Field(default=2048, ge=1, le=8192)
+    max_tokens: int = Field(default=512, ge=1, le=2048)
 
 
 class ChatResponse(BaseModel):
@@ -349,31 +372,26 @@ class ChatResponse(BaseModel):
 @app.post(
     "/chat",
     response_model=ChatResponse,
-    summary="Stateless chat completion with vLLM → Ollama fallback",
+    summary="Stateless chat completion with configured single provider",
     tags=["chat"],
 )
 async def chat(body: ChatRequest):
     """
     Accept a list of messages and return the assistant reply.
 
-    **Fallback logic**
-    - Step 1: calls vLLM (``VLLM_URL``, default ``http://localhost:7861``).
-    - Step 2: if vLLM is unreachable or times out, automatically switches to
-      Ollama (``OLLAMA_URL``, default ``http://localhost:11434``) and logs the
-      provider switch.
+    Uses single active provider configured by ``LLM_PROVIDER``.
 
     **Environment variables**
-
     | Variable     | Default                    | Description              |
     |--------------|----------------------------|--------------------------|
+    | LLM_PROVIDER | ollama                     | Active provider          |
     | VLLM_URL     | http://localhost:7861      | vLLM base URL            |
     | OLLAMA_URL   | http://localhost:11434     | Ollama base URL          |
-    | MODEL_NAME   | value from models.yaml     | Override model for both  |
+    | MODEL_NAME   | value from models.yaml     | Override model name      |
     """
     import os
 
     from .src.services.brain import get_response
-
     messages = [m.model_dump() for m in body.messages]
 
     try:
@@ -389,34 +407,19 @@ async def chat(body: ChatRequest):
     if content is None:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Both vLLM and Ollama are unavailable. "
-                "Please check VLLM_URL and OLLAMA_URL environment variables."
-            ),
+            detail="Generation provider unavailable. Check LLM_PROVIDER and provider URL settings.",
         )
 
-    # Determine which provider actually answered (logged inside get_response;
-    # we do a lightweight probe here only to populate the response field).
-    vllm_url = os.getenv("VLLM_URL", "http://localhost:7861")
-    ollama_url = os.getenv("OLLAMA_URL", "http://localhost:11434")
+    # Determine provider for response metadata (best-effort).
+    provider = (os.getenv("LLM_PROVIDER", "ollama") or "ollama").strip().lower()
     model_name = os.getenv("MODEL_NAME", "")
 
-    from .src.core.model_config import get_generation_model
-
     if not model_name:
+        from .src.core.model_config import get_generation_model
+
         try:
             model_name = get_generation_model()
         except Exception:
             model_name = "unknown"
-
-    # Infer provider by checking vLLM health (best-effort, no extra latency on
-    # the hot path — the actual provider was already logged by get_response).
-    try:
-        import httpx as _httpx
-
-        probe = _httpx.get(f"{vllm_url}/health", timeout=2.0)
-        provider = "vllm" if probe.status_code == 200 else "ollama"
-    except Exception:
-        provider = "ollama"
 
     return ChatResponse(content=content, model=model_name, provider=provider)
