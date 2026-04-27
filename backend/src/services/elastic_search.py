@@ -27,7 +27,7 @@ class ElasticsearchClient:
             self.client = Elasticsearch(
                 [f"http://{self.host}:{self.port}"],
                 verify_certs=False,
-                request_timeout=30,
+                request_timeout=6,
                 headers={
                     "Accept": "application/vnd.elasticsearch+json; compatible-with=8"
                 },
@@ -201,7 +201,7 @@ class ElasticsearchClient:
     def search_bm25(
         self,
         query: str,
-        top_k: int = settings.top_k,
+        top_k: int = settings.bm25_k,
         doc_type_filter: Optional[str] = None,
         source_filter: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
@@ -261,9 +261,6 @@ class ElasticsearchClient:
                 }
                 results.append(result)
 
-            logger.debug(
-                f"BM25 search returned {len(results)} results for query: {query[:50]}..."
-            )
             return results
         except exceptions.RequestError as e:
             logger.error(f"Error performing BM25 search: {e}")
@@ -304,3 +301,11 @@ def get_elasticsearch_client() -> ElasticsearchClient:
     if _es_client_instance is None:
         _es_client_instance = ElasticsearchClient()
     return _es_client_instance
+
+
+def warmup_elasticsearch_client() -> None:
+    """Initialize singleton ES client early at startup."""
+    try:
+        _ = get_elasticsearch_client()
+    except Exception as e:
+        logger.warning(f"[ES] Warmup failed: {e}")
