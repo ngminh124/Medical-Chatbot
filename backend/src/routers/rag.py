@@ -14,14 +14,17 @@ from loguru import logger
 
 from ..configs.setup import get_backend_settings
 from ..core.metrics import (
+    rag_active_requests,
     rag_cache_hits_total,
     rag_cache_misses_total,
     rag_cache_requests_total,
     rag_errors_total,
+    rag_generation_duration_seconds,
     rag_llm_duration_seconds,
     rag_request_duration_seconds,
     rag_requests_total,
     rag_retrieval_duration_seconds,
+    rag_tokens_generated_total,
 )
 from ..core.runtime_settings import get_runtime_settings
 from ..core.security import get_current_user
@@ -180,6 +183,7 @@ def run_rag_pipeline(
     web_search_used = False
     total_start = time.perf_counter()
     rag_requests_total.inc()
+    rag_active_requests.inc()
 
     runtime = get_runtime_settings()
     rewrite_enabled = bool(runtime.get("rewrite_enabled", True))
@@ -198,6 +202,7 @@ def run_rag_pipeline(
         if cached_final:
             logger.info("[RAG] Final response cache hit")
             rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            rag_active_requests.dec()
             return {
                 "answer": str(cached_final.get("answer") or ""),
                 "citations": list(cached_final.get("citations") or []),
@@ -226,6 +231,7 @@ def run_rag_pipeline(
 
         if not is_valid:
             logger.warning(f"[GUARD] Query blocked: category={violation}")
+            rag_active_requests.dec()
             return {
                 "answer": guard.get_rejection_message(violation or "unknown"),
                 "citations": [],
@@ -328,11 +334,13 @@ def run_rag_pipeline(
 
             logger.info(f"[PERF] total_time={time.perf_counter() - total_start:.3f}s")
             rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            rag_active_requests.dec()
             return result_payload
         except Exception as e:
             logger.warning(f"[RAG] Tavily failed, return immediate fallback: {e}")
             rag_errors_total.inc()
             rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            rag_active_requests.dec()
             return {
                 "answer": "Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau.",
                 "citations": [],
@@ -405,6 +413,9 @@ def run_rag_pipeline(
         answer = get_response(messages, temperature=0.3, max_tokens=max_tokens)
         llm_duration = time.perf_counter() - llm_start
         rag_llm_duration_seconds.observe(llm_duration)
+        rag_generation_duration_seconds.observe(llm_duration)
+        if answer:
+            rag_tokens_generated_total.inc(max(1, len(str(answer).split())))
         logger.info(f"[PERF] llm_time={llm_duration:.3f}s")
     except Exception as e:
         logger.error(f"[RAG] Generation failed: {e}")
@@ -442,6 +453,7 @@ def run_rag_pipeline(
     total_duration = time.perf_counter() - total_start
     rag_request_duration_seconds.observe(total_duration)
     logger.info(f"[PERF] total_time={total_duration:.3f}s")
+    rag_active_requests.dec()
     return result_payload
 
 
@@ -463,6 +475,7 @@ def run_rag_pipeline_stream(
     web_search_used = False
     total_start = time.perf_counter()
     rag_requests_total.inc()
+    rag_active_requests.inc()
 
     runtime = get_runtime_settings()
     rewrite_enabled = bool(runtime.get("rewrite_enabled", True))
@@ -484,6 +497,7 @@ def run_rag_pipeline_stream(
                 for part in cached_answer.split(" "):
                     yield f"{part} "
 
+            rag_active_requests.dec()
             return {
                 "answer_stream": _cached_stream(),
                 "answer_parts": [cached_answer],
@@ -510,6 +524,7 @@ def run_rag_pipeline_stream(
             def _blocked_stream() -> Iterator[str]:
                 yield rejected
 
+            rag_active_requests.dec()
             return {
                 "answer_stream": _blocked_stream(),
                 "answer_parts": [rejected],
@@ -583,6 +598,7 @@ def run_rag_pipeline_stream(
                     for part in web_answer.split(" "):
                         yield f"{part} "
 
+                rag_active_requests.dec()
                 return {
                     "answer_stream": _web_stream(),
                     "answer_parts": [],
@@ -599,6 +615,7 @@ def run_rag_pipeline_stream(
             def _fallback_web_stream() -> Iterator[str]:
                 yield "Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau."
 
+            rag_active_requests.dec()
             return {
                 "answer_stream": _fallback_web_stream(),
                 "answer_parts": ["Xin lỗi, web search hiện không khả dụng. Vui lòng thử lại sau."],
@@ -681,6 +698,8 @@ def run_rag_pipeline_stream(
                 yield token
             llm_duration = time.perf_counter() - llm_start
             rag_llm_duration_seconds.observe(llm_duration)
+            rag_generation_duration_seconds.observe(llm_duration)
+            rag_tokens_generated_total.inc(max(1, token_count))
             logger.info(f"[PERF] llm_time_stream={llm_duration:.3f}s")
             logger.info(f"[STREAM_END] rag_answer_stream tokens={token_count}")
         except Exception as exc:
@@ -689,6 +708,7 @@ def run_rag_pipeline_stream(
             raise
         finally:
             rag_request_duration_seconds.observe(time.perf_counter() - total_start)
+            rag_active_requests.dec()
 
     return {
         "answer_stream": _answer_stream(),
