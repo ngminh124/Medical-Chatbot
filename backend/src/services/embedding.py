@@ -12,7 +12,9 @@ Key Features:
 - Caching: Optional query/embedding caching via Redis
 - Local fallback: Uses SentenceTransformer in-process if HTTP service is down
 """
+import hashlib
 import threading
+import time
 from typing import Any, List, Optional
 
 import httpx
@@ -51,6 +53,34 @@ def _get_local_embed_model() -> Optional[Any]:
 
 settings = get_backend_settings()
 
+# ── Lightweight in-memory embedding cache fallback ───────────────────────────
+_embed_mem_cache: dict[str, tuple[float, List[float]]] = {}
+_embed_mem_lock = threading.Lock()
+_EMBED_CACHE_TTL_SECONDS = 3600
+
+
+def _hash_query_key(instruction: str, query: str) -> str:
+    raw = f"{instruction}::{query}".strip().lower()
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _mem_get(cache_key: str) -> Optional[List[float]]:
+    now = time.time()
+    with _embed_mem_lock:
+        item = _embed_mem_cache.get(cache_key)
+        if not item:
+            return None
+        expires_at, value = item
+        if expires_at < now:
+            _embed_mem_cache.pop(cache_key, None)
+            return None
+        return value
+
+
+def _mem_set(cache_key: str, value: List[float], ttl: int = _EMBED_CACHE_TTL_SECONDS) -> None:
+    with _embed_mem_lock:
+        _embed_mem_cache[cache_key] = (time.time() + ttl, value)
+
 
 class Qwen3EmbeddingService:
     """
@@ -86,8 +116,10 @@ class Qwen3EmbeddingService:
 
         self.task_instruction = task_instruction or self.DEFAULT_TASK_INSTRUCTION
         self.client = httpx.Client(timeout=120.0)
-
-        logger.info(f"Qwen3EmbeddingService initialized with URL: {self.local_url}")
+        self._remote_failures = 0
+        self._remote_down_until = 0.0
+        self._remote_down_ttl_seconds = 60
+        self._remote_failure_threshold = 3
 
     def embed_query(
         self, query: str, use_cache: bool = True, task_instruction: Optional[str] = None
@@ -104,13 +136,20 @@ class Qwen3EmbeddingService:
             Embedding vector (1024-dim) or None on error
         """
         instruction = task_instruction or self.task_instruction
-        cache_key = f"query:{instruction}:{query}"
+        cache_key = _hash_query_key(instruction=instruction, query=query)
 
         if use_cache:
+            # 1) Fast in-memory cache
+            in_mem = _mem_get(cache_key)
+            if in_mem:
+                return in_mem
+
+            # 2) Redis cache
             from ..core.cache import get_query_embedding
 
             cached_embedding = get_query_embedding(cache_key)
             if cached_embedding:
+                _mem_set(cache_key, cached_embedding)
                 return cached_embedding
 
         embedding = self._embed_with_local(
@@ -123,6 +162,7 @@ class Qwen3EmbeddingService:
             from ..core.cache import cache_query_embedding
 
             cache_query_embedding(cache_key, embedding)
+            _mem_set(cache_key, embedding)
 
         return embedding
 
@@ -188,30 +228,45 @@ class Qwen3EmbeddingService:
         Call local HTTP embedding service for inference.
         Falls back to in-process SentenceTransformer if the HTTP service is down.
         """
+        now = time.time()
+        remote_available = now >= self._remote_down_until
+
         # ── Primary path: HTTP service ────────────────────────────────────────
-        try:
-            payload = {
-                "texts": texts,
-                "normalize": True,
-                "is_query": is_query,
-            }
-            if is_query and instruction:
-                payload["instruction"] = instruction
+        if remote_available:
+            try:
+                payload = {
+                    "texts": texts,
+                    "normalize": True,
+                    "is_query": is_query,
+                }
+                if is_query and instruction:
+                    payload["instruction"] = instruction
 
-            response = self.client.post(
-                f"{self.local_url}/v1/models/embed",
-                json=payload,
-            )
+                response = self.client.post(
+                    f"{self.local_url}/v1/models/embed",
+                    json=payload,
+                )
 
-            if response.status_code == 200:
-                result = response.json()
-                return result.get("embeddings")
-            else:
+                if response.status_code == 200:
+                    result = response.json()
+                    self._remote_failures = 0
+                    return result.get("embeddings")
+
+                self._remote_failures += 1
                 logger.error(
                     f"[EMBED] HTTP service error: {response.status_code} - {response.text}"
                 )
-        except Exception as e:
-            logger.warning(f"[EMBED] HTTP service unavailable ({e}), trying local fallback…")
+            except Exception as e:
+                self._remote_failures += 1
+                logger.warning(f"[EMBED] HTTP service unavailable ({e}), trying local fallback…")
+
+            if self._remote_failures > self._remote_failure_threshold:
+                self._remote_down_until = time.time() + self._remote_down_ttl_seconds
+                logger.warning(
+                    f"[EMBED][CB] Remote service marked DOWN for {self._remote_down_ttl_seconds}s"
+                )
+        else:
+            logger.debug("[EMBED][CB] Skip remote call while service is DOWN")
 
         # ── Fallback path: in-process SentenceTransformer ─────────────────────
         model = _get_local_embed_model()
@@ -251,6 +306,7 @@ class Qwen3EmbeddingService:
 
 # Singleton instance
 _embedding_service_instance = None
+_embedding_service_lock = threading.Lock()
 
 
 def get_embedding_service() -> Qwen3EmbeddingService:
@@ -262,5 +318,9 @@ def get_embedding_service() -> Qwen3EmbeddingService:
     """
     global _embedding_service_instance
     if _embedding_service_instance is None:
-        _embedding_service_instance = Qwen3EmbeddingService()
+        with _embedding_service_lock:
+            if _embedding_service_instance is None:
+                _embedding_service_instance = Qwen3EmbeddingService()
+    else:
+        logger.debug("[EMBEDDING] reused instance")
     return _embedding_service_instance
