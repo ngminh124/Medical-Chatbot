@@ -155,7 +155,7 @@ export const chatAPI = {
         throw err;
       }
 
-      const chunk = payload?.chunk ?? payload?.delta ?? payload?.token ?? payload?.content ?? "";
+      const chunk = payload?.chunk ?? payload?.delta ?? payload?.token ?? payload?.data ?? payload?.content ?? "";
       if (chunk) {
         assistantText += chunk;
         onChunk?.(chunk, assistantText, payload);
