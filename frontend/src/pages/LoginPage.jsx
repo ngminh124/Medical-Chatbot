@@ -18,8 +18,9 @@ export default function LoginPage() {
     setError("");
     setLoading(true);
     try {
-      await login(email, password);
-      navigate("/", { replace: true });
+      const user = await login(email, password);
+      const role = (user?.type || "user").toLowerCase();
+      navigate(role === "admin" ? "/admin" : "/chat", { replace: true });
     } catch (err) {
       setError(
         err.response?.data?.detail || "Đã có lỗi xảy ra. Vui lòng thử lại."
@@ -58,14 +59,14 @@ export default function LoginPage() {
           <form onSubmit={handleSubmit} className="space-y-5">
             <div>
               <label className="mb-2 block text-base font-medium text-gray-700">
-                Email
+                Email hoặc tên đăng nhập
               </label>
               <input
-                type="email"
+                type="text"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
                 required
-                placeholder="example@email.com"
+                placeholder="admin hoặc example@email.com"
                 className="w-full rounded-lg border border-gray-300 px-4 py-3.5 text-base transition-colors focus:border-primary-500 focus:outline-none focus:ring-2 focus:ring-primary-500/20"
               />
             </div>
