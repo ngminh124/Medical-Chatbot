@@ -2,8 +2,8 @@ import { Navigate } from "react-router-dom";
 import { useAuth } from "../contexts/AuthContext";
 import { Loader2 } from "lucide-react";
 
-export default function ProtectedRoute({ children }) {
-  const { isAuthenticated, loading } = useAuth();
+export default function ProtectedRoute({ children, allowedRoles, redirectTo = "/login" }) {
+  const { isAuthenticated, loading, user } = useAuth();
 
   if (loading) {
     return (
@@ -15,6 +15,14 @@ export default function ProtectedRoute({ children }) {
 
   if (!isAuthenticated) {
     return <Navigate to="/login" replace />;
+  }
+
+  if (Array.isArray(allowedRoles) && allowedRoles.length > 0) {
+    const role = (user?.type || "user").toLowerCase();
+    const isAllowed = allowedRoles.map((r) => r.toLowerCase()).includes(role);
+    if (!isAllowed) {
+      return <Navigate to={redirectTo} replace />;
+    }
   }
 
   return children;

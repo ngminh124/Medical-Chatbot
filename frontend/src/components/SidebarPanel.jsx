@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { chatAPI } from "../api/chat";
 import { useAuth } from "../contexts/AuthContext";
 import { useTheme } from "../contexts/ThemeContext";
@@ -27,28 +27,54 @@ export default function SidebarPanel({
 }) {
   const { user, logout } = useAuth();
   const { isDark, toggle: toggleTheme } = useTheme();
+
+  const PAGE_LIMIT = 50;
   const [threads, setThreads] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [threadsExpanded, setThreadsExpanded] = useState(true);
+  const [skip, setSkip] = useState(0);
+  const [hasMore, setHasMore] = useState(true);
+  const listContainerRef = useRef(null);
 
-  const fetchThreads = async () => {
+  const fetchThreads = useCallback(async (nextSkip = 0, append = false) => {
+    if (append) {
+      setLoadingMore(true);
+    } else {
+      setLoading(true);
+    }
+
     try {
-      const res = await chatAPI.listThreads();
-      setThreads(res.data);
+      const res = await chatAPI.listThreads(nextSkip, PAGE_LIMIT);
+      const items = Array.isArray(res?.data) ? res.data : [];
+      setThreads((prev) => (append ? [...prev, ...items] : items));
+      setSkip(nextSkip + items.length);
+      setHasMore(items.length === PAGE_LIMIT);
     } catch {
       /* silent */
     } finally {
       setLoading(false);
+      setLoadingMore(false);
     }
-  };
-
-  useEffect(() => {
-    fetchThreads();
   }, []);
 
   useEffect(() => {
-    if (activeThreadId) fetchThreads();
-  }, [activeThreadId]);
+    fetchThreads(0, false);
+  }, [fetchThreads]);
+
+  useEffect(() => {
+    if (activeThreadId) fetchThreads(0, false);
+  }, [activeThreadId, fetchThreads]);
+
+  useEffect(() => {
+    if (loading || loadingMore || !hasMore || !threadsExpanded) return;
+    const node = listContainerRef.current;
+    if (!node) return;
+
+    if (node.scrollHeight <= node.clientHeight + 8) {
+      fetchThreads(skip, true);
+    }
+  }, [fetchThreads, hasMore, loading, loadingMore, skip, threads, threadsExpanded]);
 
   const handleDelete = async (e, threadId) => {
     e.stopPropagation();
@@ -70,6 +96,17 @@ export default function SidebarPanel({
   const handleNewChat = () => {
     onNewChat();
     onCloseMobile?.();
+  };
+
+  const handleThreadScroll = async (e) => {
+    const node = e.currentTarget;
+    if (!node || loading || loadingMore || !hasMore) return;
+
+    const threshold = 100;
+    const reachedBottom = node.scrollTop + node.clientHeight >= node.scrollHeight - threshold;
+    if (!reachedBottom) return;
+
+    await fetchThreads(skip, true);
   };
 
   if (collapsed) {
@@ -160,7 +197,12 @@ export default function SidebarPanel({
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto px-4 pb-4">
+        <div
+          ref={listContainerRef}
+          className="flex-1 min-h-0 overflow-y-auto px-4 pb-6"
+          style={{ overflowY: "auto" }}
+          onScroll={handleThreadScroll}
+        >
           <button
             onClick={() => setThreadsExpanded((prev) => !prev)}
             className="group mb-2 flex w-full items-center justify-between rounded-lg px-2 py-2 text-left text-sm font-semibold text-gray-700 transition-colors hover:bg-gray-50 dark:text-gray-200 dark:hover:bg-gray-800"
@@ -171,12 +213,8 @@ export default function SidebarPanel({
             </span>
           </button>
 
-          <div
-            className={`overflow-hidden transition-all duration-300 ease-in-out ${
-              threadsExpanded ? "max-h-[70vh] opacity-100" : "max-h-0 opacity-0"
-            }`}
-          >
-            {loading ? (
+          {threadsExpanded && (
+            loading ? (
               <div className="space-y-2">
                 {[...Array(5)].map((_, i) => (
                   <div key={i} className="skeleton h-12 rounded-lg" />
@@ -188,7 +226,7 @@ export default function SidebarPanel({
                 <p className="mt-2 text-sm text-gray-400 dark:text-gray-500">Chưa có cuộc trò chuyện nào</p>
               </div>
             ) : (
-              <div className="space-y-2">
+              <div className="space-y-2 pb-2">
                 {threads.map((thread) => (
                   <button
                     key={thread.id}
@@ -217,9 +255,14 @@ export default function SidebarPanel({
                     </button>
                   </button>
                 ))}
+                {loadingMore && (
+                  <div className="py-2 text-center text-sm text-gray-400 dark:text-gray-500">
+                    Đang tải thêm...
+                  </div>
+                )}
               </div>
-            )}
-          </div>
+            )
+          )}
         </div>
 
         <div className="border-t border-gray-100 p-4 dark:border-gray-800">

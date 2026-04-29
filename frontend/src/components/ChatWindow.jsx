@@ -200,7 +200,7 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
       metadata_: { is_streaming: true },
     };
 
-    setMessages((prev) => [...prev, tempUserMsg, tempAssistantMsg]);
+    setMessages((prev) => [...prev, tempUserMsg]);
     if (!contentOverride) setInput("");
     setIsWaitingFirstChunk(true);
 
@@ -218,20 +218,54 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
           { web_search_enabled: webSearchEnabled },
           {
             signal,
-            onChunk: (_chunk, fullText) => {
-              streamedText = fullText;
-              if (!hasReceivedChunk) {
-                hasReceivedChunk = true;
-                setIsWaitingFirstChunk(false);
+            onEvent: ({ event, payload }) => {
+              if (event === "start" || payload?.type === "start") {
+                setMessages((prev) => {
+                  if (prev.some((m) => m.id === tempStreamId)) return prev;
+                  return [...prev, tempAssistantMsg];
+                });
+                return;
               }
 
-              setMessages((prev) =>
-                prev.map((m) =>
-                  m.id === tempStreamId
-                    ? { ...m, content: fullText, metadata_: { ...(m.metadata_ || {}), is_streaming: true } }
-                    : m
-                )
-              );
+              if (event === "token" || payload?.type === "token") {
+                const token = payload?.data ?? payload?.chunk ?? payload?.token ?? payload?.content ?? "";
+                if (!token) return;
+
+                streamedText += token;
+                if (!hasReceivedChunk) {
+                  hasReceivedChunk = true;
+                  setIsWaitingFirstChunk(false);
+                }
+
+                setMessages((prev) => {
+                  if (!prev.some((m) => m.id === tempStreamId)) {
+                    return [
+                      ...prev,
+                      {
+                        ...tempAssistantMsg,
+                        content: token,
+                      },
+                    ];
+                  }
+
+                  return prev.map((m) =>
+                    m.id === tempStreamId
+                      ? { ...m, content: (m.content || "") + token, metadata_: { ...(m.metadata_ || {}), is_streaming: true } }
+                      : m
+                  );
+                });
+                return;
+              }
+
+              if (event === "end" || payload?.type === "end") {
+                setMessages((prev) =>
+                  prev.map((m) =>
+                    m.id === tempStreamId
+                      ? { ...m, metadata_: { ...(m.metadata_ || {}), is_streaming: false } }
+                      : m
+                  )
+                );
+              }
             },
           }
         );
@@ -271,11 +305,20 @@ export default function ChatWindow({ threadId, onThreadCreated }) {
         },
       };
 
-      setMessages((prev) => [
-        ...prev.filter((m) => m.id !== tempId && m.id !== tempStreamId),
-        finalUserMessage,
-        finalAssistantMessage,
-      ]);
+      setMessages((prev) => {
+        const userReplaced = prev.map((m) => (m.id === tempId ? finalUserMessage : m));
+        const hasAssistant = userReplaced.some((m) => m.id === tempStreamId);
+
+        if (hasAssistant) {
+          return userReplaced.map((m) =>
+            m.id === tempStreamId
+              ? { ...finalAssistantMessage, metadata_: { ...(finalAssistantMessage.metadata_ || {}), is_streaming: false } }
+              : m
+          );
+        }
+
+        return [...userReplaced, { ...finalAssistantMessage, metadata_: { ...(finalAssistantMessage.metadata_ || {}), is_streaming: false } }];
+      });
     } catch (err) {
       if (signal?.aborted || err?.name === "CanceledError" || err?.code === "ERR_CANCELED") {
         setMessages((prev) =>
