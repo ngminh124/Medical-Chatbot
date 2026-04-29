@@ -11,6 +11,8 @@ qdrant_data/
 rehierarchy_output/
 scripts/
 temp/
+monitoring/promtail
+backend/logs
 
 # Ignore environment files
 database/.env
