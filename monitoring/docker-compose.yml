@@ -1,0 +1,104 @@
+services:
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: monitoring-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:9090/-/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  loki:
+    image: grafana/loki:2.9.10
+    container_name: monitoring-loki
+    command: ["-config.file=/etc/loki/loki-config.yaml"]
+    volumes:
+      - ./loki/loki-config.yaml:/etc/loki/loki-config.yaml:ro
+      - loki_data:/loki
+    ports:
+      - "3100:3100"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:3100/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  promtail:
+    image: grafana/promtail:2.9.10
+    container_name: monitoring-promtail
+    command: ["-config.file=/etc/promtail/promtail.yaml"]
+    volumes:
+      - ./promtail/promtail.yaml:/etc/promtail/promtail.yaml:ro
+      - ./promtail/positions:/var/lib/promtail
+      - ../backend/logs:/var/log/fastapi:ro
+    depends_on:
+      - loki
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.6.1
+    container_name: monitoring-tempo
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    volumes:
+      - ./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro
+      - tempo_data:/var/tempo
+    ports:
+      - "3200:3200"
+      - "4317:4317"
+      - "4318:4318"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:3200/ready"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+  grafana:
+    image: grafana/grafana:11.1.4
+    container_name: monitoring-grafana
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SECURITY_ALLOW_EMBEDDING: "true"
+      GF_SECURITY_COOKIE_SAMESITE: "none"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: "Viewer"
+      GF_AUTH_ANONYMOUS_ORG_NAME: "Main Org."
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-http://localhost:3000}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+      - loki
+      - tempo
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  prometheus_data:
+  loki_data:
+  tempo_data:
+  grafana_data:
