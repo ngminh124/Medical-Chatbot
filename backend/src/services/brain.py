@@ -789,31 +789,8 @@ def generate_conversation_text(conversations):
 
 
 def detect_route(history, message):
-    """Detect conversation route (medical vs general)."""
-    text = (message or "").strip().lower()
-    if not text:
-        return "general"
-
-    medical_keywords = (
-        "bệnh",
-        "triệu chứng",
-        "thuốc",
-        "điều trị",
-        "xét nghiệm",
-        "chẩn đoán",
-        "đau",
-        "sốt",
-        "ho",
-        "viêm",
-        "tim",
-        "phổi",
-        "huyết áp",
-        "tiểu đường",
-        "covid",
-        "ung thư",
-        "nhi khoa",
-    )
-    return "medical" if any(k in text for k in medical_keywords) else "general"
+    """Force all requests through the medical route."""
+    return "medical"
 
 
 def get_tavily_agent_answer(messages):
