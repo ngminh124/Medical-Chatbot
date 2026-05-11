@@ -1,14 +1,5 @@
 import client from "./client";
-
-const API_BASE_URL = import.meta.env.VITE_API_URL || "";
-
-function buildApiUrl(path) {
-  if (!API_BASE_URL) return path;
-  if (/^https?:\/\//i.test(API_BASE_URL)) {
-    return `${API_BASE_URL.replace(/\/$/, "")}${path}`;
-  }
-  return `${API_BASE_URL}${path}`;
-}
+import { buildApiUrl } from "../lib/api";
 
 function parseSSEEvent(rawEvent) {
   let event = "message";
@@ -96,6 +87,7 @@ export const chatAPI = {
           Accept: "text/event-stream",
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
+        credentials: "include",
         body: JSON.stringify({
           content,
           ...(typeof options.web_search_enabled === "boolean"

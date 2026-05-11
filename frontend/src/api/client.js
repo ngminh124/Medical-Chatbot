@@ -1,12 +1,6 @@
-import axios from "axios";
+import { api } from "../lib/api";
 
-const API_BASE_URL = import.meta.env.VITE_API_URL || "";
-
-const client = axios.create({
-  baseURL: API_BASE_URL,
-  headers: { "Content-Type": "application/json" },
-  timeout: 300_000,
-});
+const client = api;
 
 // ── Request interceptor: attach JWT ─────────────────────────
 client.interceptors.request.use((config) => {
