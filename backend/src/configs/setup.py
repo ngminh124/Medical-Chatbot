@@ -57,7 +57,7 @@ class BackendSettings(BaseSettings):
     top_k: int = Field(default=5, description="Number of top results to return")
     vector_k: int = Field(default=8, description="Vector search candidate size")
     bm25_k: int = Field(default=8, description="BM25 search candidate size")
-    final_k: int = Field(default=4, description="Final retrieved docs after fusion")
+    final_k: int = Field(default=3, description="Final retrieved docs after fusion")
 
     # Batch Processing Configuration
     batch_size: int = Field(
@@ -119,16 +119,16 @@ class BackendSettings(BaseSettings):
     tavily_api_key: str = Field(
         default="", description="Tavily API key for web search"
     )
-    gemini_api_key: str = Field(
-        default="", description="Gemini API key for rewrite service"
+    deepseek_api_key: str = Field(
+        default="", description="DeepSeek API key for rewrite service"
     )
-    gemini_base_url: str = Field(
-        default="https://generativelanguage.googleapis.com/v1beta/openai",
-        description="Gemini base URL (OpenAI-compatible)",
+    deepseek_base_url: str = Field(
+        default="https://api.deepseek.com/v1",
+        description="DeepSeek base URL (OpenAI-compatible)",
     )
-    gemini_rewrite_model: str = Field(
-        default="gemini-2.0-flash",
-        description="Gemini model for query rewrite",
+    deepseek_rewrite_model: str = Field(
+        default="deepseek-chat",
+        description="DeepSeek model for query rewrite",
     )
 
     # TTS / STT configuration
