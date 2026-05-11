@@ -57,7 +57,7 @@ GENERAL_SYSTEM_PROMPT = (
 )
 
 MAX_CONTEXT_CHARS = 6000  # ~1500 tokens (rough)
-RETRIEVAL_TIMEOUT_SECONDS = max(1.0, float(os.getenv("RETRIEVAL_TIMEOUT_SECONDS", "2.0")))
+RETRIEVAL_TIMEOUT_SECONDS = max(1.0, float(os.getenv("RETRIEVAL_TIMEOUT_SECONDS", "30.0")))
 
 
 def _build_retrieval_cache_key(
@@ -169,7 +169,7 @@ def run_rag_pipeline(
     -----
     1. Guardrails check         (soft-fail — continues if GPU service is down)
     2. Intent detection         (medical vs general)
-    3. Query rewrite            (Gemini API with context)
+    3. Query rewrite            (DeepSeek API with context)
     4. Hybrid search            (Qdrant vector + Elasticsearch BM25 via RRF)
     5. Reranking                (Qwen3-Reranker-0.6B)
     6. Answer generation        (vLLM → Ollama fallback)
@@ -749,6 +749,18 @@ def _rerank(
         return raw_results[:top_k]
 
 
+def _extract_doc_text(doc: Dict[str, Any]) -> str:
+    content = doc.get("content") or doc.get("text") or ""
+    question = doc.get("question") or ""
+    answer = doc.get("answer") or ""
+
+    if answer and question:
+        return f"Hoi: {question}\nTra loi: {answer}"
+    if answer and not content:
+        return answer
+    return content
+
+
 def _build_context(
     results: List[Dict[str, Any]],
 ) -> tuple[str, List[Dict[str, Any]]]:
@@ -757,8 +769,15 @@ def _build_context(
     citations: List[Dict[str, Any]] = []
 
     for i, doc in enumerate(results, 1):
-        title = doc.get("title") or doc.get("file_name") or f"Tài liệu {i}"
-        content_text = doc.get("content") or doc.get("text", "")
+        title = (
+            doc.get("title")
+            or doc.get("file_name")
+            or doc.get("subject_name")
+            or doc.get("current_h2")
+            or doc.get("current_h3")
+            or f"Tài liệu {i}"
+        )
+        content_text = _extract_doc_text(doc)
         # Truncate individual doc content to keep total context manageable
         content_text = content_text[:800] if len(content_text) > 800 else content_text
         source = doc.get("source") or doc.get("file_name", "")
