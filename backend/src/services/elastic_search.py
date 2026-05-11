@@ -247,16 +247,18 @@ class ElasticsearchClient:
 
             results = []
             for hit in response["hits"]["hits"]:
+                source = hit.get("_source", {})
+                chunk_id = source.get("chunk_id") or source.get("id") or hit.get("_id")
                 result = {
-                    "chunk_id": hit["_source"]["chunk_id"],
-                    "document_id": hit["_source"]["document_id"],
-                    "chunk_index": hit["_source"]["chunk_index"],
-                    "content": hit["_source"]["content"],
-                    "title": hit["_source"]["title"],
-                    "doc_type": hit["_source"]["doc_type"],
-                    "source": hit["_source"]["source"],
-                    "metadata": hit["_source"].get("metadata", {}),
-                    "score": hit["_score"],
+                    "chunk_id": chunk_id,
+                    "document_id": source.get("document_id", ""),
+                    "chunk_index": source.get("chunk_index", 0),
+                    "content": source.get("content", ""),
+                    "title": source.get("title", ""),
+                    "doc_type": source.get("doc_type", ""),
+                    "source": source.get("source", ""),
+                    "metadata": source.get("metadata", {}),
+                    "score": hit.get("_score", 0.0),
                     "search_type": "keyword",
                 }
                 results.append(result)
