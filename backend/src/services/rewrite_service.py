@@ -1,4 +1,4 @@
-"""Gemini API-based rewrite service optimized for Medical RAG."""
+"""DeepSeek API-based rewrite service optimized for Medical RAG."""
 
 from __future__ import annotations
 import time
@@ -49,9 +49,9 @@ def rewrite_query_with_api(query: str, history: List[Dict]) -> str:
         "Rewritten question (Vietnamese):"
     )
 
-    api_key = (settings.gemini_api_key or "").strip()
+    api_key = (settings.deepseek_api_key or "").strip()
     if not api_key:
-        logger.warning("[REWRITE] missing API KEY")
+        logger.warning("[REWRITE] missing DeepSeek API key")
         return current_query
 
     # Kiểm tra nếu đang trong thời gian tạm dừng do lỗi 429
@@ -61,14 +61,11 @@ def rewrite_query_with_api(query: str, history: List[Dict]) -> str:
         logger.warning(f"[REWRITE] cool-down active: {remaining}s left")
         return current_query
 
-    # Xử lý URL chuẩn: Đảm bảo không bị lặp /v1beta/openai/chat/completions
-    base_url = (settings.gemini_base_url or "https://generativelanguage.googleapis.com/v1beta/openai").rstrip("/")
+    # Xử lý URL chuẩn: Đảm bảo không bị lặp /v1/chat/completions
+    base_url = (settings.deepseek_base_url or "https://api.deepseek.com/v1").rstrip("/")
     url = f"{base_url}/chat/completions"
     
-    # Đảm bảo model không có tiền tố 'models/' khi dùng qua OpenAI adapter
-    model = settings.gemini_rewrite_model or "gemini-1.5-flash"
-    if model.startswith("models/"):
-        model = model.replace("models/", "")
+    model = settings.deepseek_rewrite_model or "deepseek-chat"
 
     payload = {
         "model": model,
