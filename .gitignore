@@ -9,10 +9,10 @@ backend/scripts/
 backend/tests/
 qdrant_data/
 rehierarchy_output/
-scripts/
 temp/
 monitoring/promtail
 backend/logs
+/tests
 
 # Ignore environment files
 database/.env
