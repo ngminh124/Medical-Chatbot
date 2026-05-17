@@ -8,7 +8,7 @@ services:
     ports:
       - "3000:80"
     environment:
-      - VITE_API_URL=http://localhost:8000
+      - VITE_API_BASE_URL=${VITE_API_BASE_URL}
       - VITE_TTS_VOICE_ID=
       - VITE_STT_AUTO_SEND=false
       - VITE_STT_MAX_RECORDING_MS=20000
