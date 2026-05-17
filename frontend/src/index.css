@@ -1,6 +1,18 @@
+@import url("https://fonts.googleapis.com/css2?family=Manrope:wght@300;400;500;600;700&family=Unbounded:wght@400;500;600;700&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  html {
+    font-family: "Manrope", sans-serif;
+  }
+}
+
+.font-display {
+  font-family: "Unbounded", "Manrope", sans-serif;
+}
 
 html, body, #root {
   width: 100%;
@@ -39,6 +51,19 @@ html, body, #root {
   to   { opacity: 1; transform: translateY(0); }
 }
 .animate-fade-in-up { animation: fadeInUp 0.3s ease-out; }
+
+@keyframes floatSlow {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-14px); }
+}
+
+@keyframes floatSlower {
+  0%, 100% { transform: translateY(0px); }
+  50% { transform: translateY(-24px); }
+}
+
+.animate-float-slow { animation: floatSlow 10s ease-in-out infinite; }
+.animate-float-slower { animation: floatSlower 14s ease-in-out infinite; }
 
 /* ── Typing indicator dots ───────────────────────────────── */
 @keyframes typingBounce {
