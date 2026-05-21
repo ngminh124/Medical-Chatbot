@@ -216,18 +216,10 @@ def on_startup():
         except Exception as e:
             logger.warning(f"⚠️  Qdrant not available, skipping collection creation: {e}")
 
-        if settings.qwen3_models_enabled:
-            logger.info("Using GPU service for models (qwen3_models)")
-        else:
-            logger.info("Using local CPU models (embedded in backend)")
-            try:
-                from .src.core.model_loader import get_model_registry
-
-                model_registry = get_model_registry()
-                model_registry.load_models()
-                logger.success("✅ Local models loaded successfully")
-            except Exception as e:
-                logger.warning(f"⚠️  Failed to load local models: {e}")
+        logger.info(
+            "Using remote model service for embedding/rerank/guard: "
+            f"{settings.model_service_url}"
+        )
 
         logger.info("⏭️  STT/TTS eager startup init disabled (lazy init on first request)")
 
@@ -291,10 +283,12 @@ async def on_shutdown():
     try:
         from .src.services.stt_service import close_stt_service
         from .src.services.tts_service import close_tts_service
+        from .src.services.remote_model import close_remote_model_service
 
         await close_stt_service()
         await close_tts_service()
-        logger.info("✅ STT/TTS clients closed")
+        await close_remote_model_service()
+        logger.info("✅ STT/TTS and remote model clients closed")
     except Exception as e:
         logger.warning(f"⚠️  Failed to close STT/TTS clients: {e}")
 
