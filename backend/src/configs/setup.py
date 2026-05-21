@@ -49,6 +49,11 @@ class BackendSettings(BaseSettings):
     qwen3_models_url: str = Field(
         default="http://localhost:7860", description="URL of Qwen3 GPU service"
     )
+    model_service_url: str = Field(
+        default="http://localhost:7860",
+        description="Base URL for remote embedding/rerank/guard service",
+        validation_alias="MODEL_SERVICE_URL",
+    )
     backend_api_url: str = Field(
         default="http://localhost:8000", description="Backend API URL"
     )
