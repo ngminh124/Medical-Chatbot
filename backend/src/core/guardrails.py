@@ -6,16 +6,12 @@ Reference: https://huggingface.co/Qwen/Qwen3Guard-Gen-0.6B
 """
 
 import re
-import time
 from typing import Dict, Optional, Tuple
 
-import httpx
 from loguru import logger
 
-from ..configs.setup import get_backend_settings
 from .model_config import get_guardrails_model, get_guardrails_threshold
-
-settings = get_backend_settings()
+from ..services.remote_model import get_remote_model_service
 
 
 class Qwen3GuardService:
@@ -60,28 +56,12 @@ class Qwen3GuardService:
 
     def __init__(
         self,
-        local_url: Optional[str] = None,
         threshold: Optional[float] = None,
     ):
         """Initialize Qwen3Guard service."""
-        if settings.qwen3_models_enabled:
-            self.local_url = local_url or settings.qwen3_models_url
-        else:
-            self.local_url = local_url or settings.backend_api_url
-
         self.threshold = threshold or get_guardrails_threshold()
         self.huggingface_model = get_guardrails_model()
-        self.timeout = float(settings.service_http_timeout)
-        self.max_retries = 0
-        self.backoff_base = max(0.1, float(settings.service_http_backoff_seconds))
-        self.client = httpx.Client(
-            timeout=self.timeout,
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-        )
-        self._failures = 0
-        self._down_until = 0.0
-        self._down_ttl_seconds = 60
-        self._failure_threshold = 3
+        self.remote_service = get_remote_model_service()
 
     def validate_query(self, query: str) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
@@ -109,7 +89,7 @@ class Qwen3GuardService:
             )
 
         try:
-            is_safe, severity, categories, refusal, details = self._check_with_local(
+            is_safe, severity, categories, refusal, details = self._check_with_remote(
                 query, check_type="input"
             )
 
@@ -169,7 +149,7 @@ class Qwen3GuardService:
             )
 
         try:
-            is_safe, severity, categories, refusal, details = self._check_with_local(
+            is_safe, severity, categories, refusal, details = self._check_with_remote(
                 response, check_type="output", query=query
             )
 
@@ -207,56 +187,16 @@ class Qwen3GuardService:
             logger.warning(f"[GUARD] Service unavailable, fail-open: {e}")
             return True, None, {"error": str(e), "failover": True}
 
-    def _check_with_local(
+    def _check_with_remote(
         self, text: str, check_type: str = "input", query: Optional[str] = None
     ) -> Tuple[bool, str, list, Optional[str], Dict]:
-        """Check text safety using local FastAPI endpoint with Qwen3Guard-Gen-0.6B."""
+        """Check text safety using remote model service."""
         try:
-            if time.time() < self._down_until:
-                raise RuntimeError("Qwen3Guard service is temporarily DOWN (circuit breaker)")
-
             payload = {"text": text, "check_type": check_type}
             if check_type == "output" and query:
                 payload["query"] = query
 
-            response = None
-            for attempt in range(self.max_retries + 1):
-                try:
-                    response = self.client.post(
-                        f"{self.local_url}/v1/models/guard",
-                        json=payload,
-                        timeout=self.timeout,
-                    )
-
-                    if response.status_code == 200:
-                        self._failures = 0
-                        break
-
-                    if response.status_code < 500 and response.status_code != 429:
-                        raise Exception(
-                            f"Qwen3Guard failed: {response.status_code} - {response.text}"
-                        )
-
-                    raise Exception(
-                        f"Qwen3Guard transient error: {response.status_code}"
-                    )
-                except Exception as e:
-                    self._failures += 1
-                    if self._failures > self._failure_threshold:
-                        self._down_until = time.time() + self._down_ttl_seconds
-                        logger.warning(
-                            f"[GUARD][CB] Service marked DOWN for {self._down_ttl_seconds}s"
-                        )
-                    if attempt >= self.max_retries:
-                        raise
-                    logger.warning(
-                        f"[GUARD] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}."
-                    )
-
-            if response is None:
-                raise Exception("Qwen3Guard failed: empty response")
-
-            result = response.json()
+            result = self.remote_service.guard(payload)
             raw_output = result.get("raw_output", "")
             severity = result.get("severity") or self._parse_severity(raw_output)
             categories = result.get("categories") or self._parse_categories(raw_output)
@@ -387,13 +327,7 @@ class Qwen3GuardService:
 
     def health_check(self) -> bool:
         """Check if Qwen3Guard service is healthy."""
-        try:
-            response = self.client.get(
-                f"{self.local_url}/v1/ready", timeout=min(self.timeout, 5.0)
-            )
-            return response.status_code == 200
-        except Exception:
-            return False
+        return self.remote_service.health_check()
 
 
 # Singleton instance
