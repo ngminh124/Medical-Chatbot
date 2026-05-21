@@ -19,6 +19,8 @@ RERANKER_MODEL_NAME = os.environ.get("RERANKER_MODEL_NAME", "Qwen/Qwen3-Reranker
 GUARD_MODEL_NAME = os.environ.get("GUARD_MODEL_NAME", "Qwen/Qwen3Guard-Gen-0.6B")
 
 REQUESTED_EMBED_DEVICE = os.environ.get("DEVICE", "cuda")
+REQUESTED_RERANK_DEVICE = os.environ.get("RERANK_DEVICE", "cuda")
+REQUESTED_GUARD_DEVICE = os.environ.get("GUARD_DEVICE", "cuda")
 
 EMBED_BATCH_SIZE = int(os.environ.get("EMBED_BATCH_SIZE", "32"))
 EMBED_MAX_BATCH_SIZE = int(os.environ.get("EMBED_MAX_BATCH_SIZE", "128"))
@@ -27,7 +29,7 @@ GUARD_MAX_LENGTH = int(os.environ.get("GUARD_MAX_LENGTH", "512"))
 GUARD_MAX_NEW_TOKENS = int(os.environ.get("GUARD_MAX_NEW_TOKENS", "64"))
 
 
-def _choose_embedding_device(requested: str) -> str:
+def _choose_device(requested: str) -> str:
     req = (requested or "cpu").lower()
     if req == "cuda" and torch.cuda.is_available():
         return "cuda"
@@ -36,9 +38,12 @@ def _choose_embedding_device(requested: str) -> str:
     return "cpu"
 
 
-EMBEDDING_DEVICE = _choose_embedding_device(REQUESTED_EMBED_DEVICE)
+EMBEDDING_DEVICE = _choose_device(REQUESTED_EMBED_DEVICE)
+RERANK_DEVICE = _choose_device(REQUESTED_RERANK_DEVICE)
+GUARD_DEVICE = _choose_device(REQUESTED_GUARD_DEVICE)
 logger.info(
-    f"Service init (lazy): embedding_device={EMBEDDING_DEVICE}, rerank_device=cpu, guard_device=cpu"
+    f"Service init (lazy): embedding_device={EMBEDDING_DEVICE}, "
+    f"rerank_device={RERANK_DEVICE}, guard_device={GUARD_DEVICE}"
 )
 
 
@@ -117,6 +122,7 @@ def parse_guard_output(text: str) -> Dict[str, Any]:
 class RerankBundle:
     tokenizer: AutoTokenizer
     model: AutoModelForCausalLM
+    device: str
     token_true_id: int
     token_false_id: int
     prefix_tokens: List[int]
@@ -127,6 +133,7 @@ class RerankBundle:
 class GuardBundle:
     tokenizer: AutoTokenizer
     model: AutoModelForCausalLM
+    device: str
 
 
 class ModelManager:
@@ -138,6 +145,8 @@ class ModelManager:
 
         self._rerank_bundle: Optional[RerankBundle] = None
         self._guard_bundle: Optional[GuardBundle] = None
+        self._rerank_device: str = RERANK_DEVICE
+        self._guard_device: str = GUARD_DEVICE
 
     def get_embedding_model(self) -> Tuple[SentenceTransformer, str, int]:
         with self._lock:
@@ -164,14 +173,17 @@ class ModelManager:
     def get_rerank_bundle(self) -> RerankBundle:
         with self._lock:
             if self._rerank_bundle is None:
-                logger.info(f"[LOAD] Reranker -> {RERANKER_MODEL_NAME} on cpu")
+                logger.info(
+                    f"[LOAD] Reranker -> {RERANKER_MODEL_NAME} on {self._rerank_device}"
+                )
                 tokenizer = AutoTokenizer.from_pretrained(RERANKER_MODEL_NAME, padding_side="left")
+                dtype = torch.float16 if self._rerank_device == "cuda" else torch.float32
                 model = AutoModelForCausalLM.from_pretrained(
                     RERANKER_MODEL_NAME,
                     trust_remote_code=True,
-                    torch_dtype=torch.float32,
+                    torch_dtype=dtype,
                     low_cpu_mem_usage=True,
-                ).to("cpu")
+                ).to(self._rerank_device)
                 model.eval()
 
                 token_true_id = tokenizer.convert_tokens_to_ids("yes")
@@ -192,29 +204,35 @@ class ModelManager:
                 self._rerank_bundle = RerankBundle(
                     tokenizer=tokenizer,
                     model=model,
+                    device=self._rerank_device,
                     token_true_id=int(token_true_id),
                     token_false_id=int(token_false_id),
                     prefix_tokens=prefix_tokens,
                     suffix_tokens=suffix_tokens,
                 )
-                logger.success("[LOAD] Reranker ready on CPU")
+                logger.success(f"[LOAD] Reranker ready on {self._rerank_device}")
 
             return self._rerank_bundle
 
     def get_guard_bundle(self) -> GuardBundle:
         with self._lock:
             if self._guard_bundle is None:
-                logger.info(f"[LOAD] Guard -> {GUARD_MODEL_NAME} on cpu")
+                logger.info(
+                    f"[LOAD] Guard -> {GUARD_MODEL_NAME} on {self._guard_device}"
+                )
                 tokenizer = AutoTokenizer.from_pretrained(GUARD_MODEL_NAME)
+                dtype = torch.float16 if self._guard_device == "cuda" else torch.float32
                 model = AutoModelForCausalLM.from_pretrained(
                     GUARD_MODEL_NAME,
                     trust_remote_code=True,
-                    torch_dtype=torch.float32,
+                    torch_dtype=dtype,
                     low_cpu_mem_usage=True,
-                ).to("cpu")
+                ).to(self._guard_device)
                 model.eval()
-                self._guard_bundle = GuardBundle(tokenizer=tokenizer, model=model)
-                logger.success("[LOAD] Guard ready on CPU")
+                self._guard_bundle = GuardBundle(
+                    tokenizer=tokenizer, model=model, device=self._guard_device
+                )
+                logger.success(f"[LOAD] Guard ready on {self._guard_device}")
 
             return self._guard_bundle
 
@@ -228,11 +246,11 @@ class ModelManager:
                 },
                 "reranker": {
                     "loaded": self._rerank_bundle is not None,
-                    "device": "cpu",
+                    "device": self._rerank_device,
                 },
                 "guard": {
                     "loaded": self._guard_bundle is not None,
-                    "device": "cpu",
+                    "device": self._guard_device,
                 },
             }
 
@@ -272,8 +290,8 @@ def ready():
         },
         "devices": {
             "embedding": status["embedding"]["device"],
-            "reranker": "cpu",
-            "guard": "cpu",
+            "reranker": status["reranker"]["device"],
+            "guard": status["guard"]["device"],
         },
     }
 
@@ -349,14 +367,14 @@ def _rerank_impl(req: RerankRequest) -> RerankResponse:
         inputs["input_ids"][i] = bundle.prefix_tokens + ids + bundle.suffix_tokens
 
     padded = bundle.tokenizer.pad(inputs, padding=True, return_tensors="pt")
-    padded = {k: v.to("cpu") for k, v in padded.items()}
+    padded = {k: v.to(bundle.device) for k, v in padded.items()}
 
     with torch.inference_mode():
         logits = bundle.model(**padded).logits[:, -1, :]
         true_logits = logits[:, bundle.token_true_id]
         false_logits = logits[:, bundle.token_false_id]
         pair = torch.stack([false_logits, true_logits], dim=1)
-        scores = torch.nn.functional.softmax(pair, dim=1)[:, 1].cpu().tolist()
+        scores = torch.nn.functional.softmax(pair, dim=1)[:, 1].float().cpu().tolist()
 
     sorted_indices = sorted(range(len(scores)), key=lambda i: scores[i], reverse=True)[:top_n]
     sorted_scores = [scores[i] for i in sorted_indices]
@@ -397,7 +415,7 @@ def _guard_impl(req: GuardRequest) -> GuardResponse:
         padding=True,
         truncation=True,
         max_length=GUARD_MAX_LENGTH,
-    ).to("cpu")
+    ).to(bundle.device)
 
     with torch.inference_mode():
         generated_ids = bundle.model.generate(
