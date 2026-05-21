@@ -1,13 +1,9 @@
 from typing import Any, Dict, List, Optional, Tuple
-import time
 
-import httpx
 from loguru import logger
 
-from ..configs.setup import get_backend_settings
 from ..core.model_config import get_reranking_model
-
-settings = get_backend_settings()
+from .remote_model import get_remote_model_service
 
 
 class Qwen3RerankerService:
@@ -30,28 +26,13 @@ class Qwen3RerankerService:
 
     def __init__(
         self,
-        local_url: Optional[str] = None,
         task_instruction: Optional[str] = None,
     ):
-        """Initialize Qwen3 Reranker Service with local GPU service."""
-        if settings.qwen3_models_enabled:
-            self.local_url = local_url or settings.qwen3_models_url
-        else:
-            self.local_url = local_url or settings.backend_api_url
+        """Initialize Qwen3 Reranker Service with remote model service."""
 
         self.huggingface_model = get_reranking_model()
         self.task_instruction = task_instruction or self.DEFAULT_TASK_INSTRUCTION
-        self.timeout = float(settings.service_http_timeout)
-        self.max_retries = 0
-        self.backoff_base = max(0.1, float(settings.service_http_backoff_seconds))
-        self.client = httpx.Client(
-            timeout=self.timeout,
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
-        )
-        self._failures = 0
-        self._down_until = 0.0
-        self._down_ttl_seconds = 60
-        self._failure_threshold = 3
+        self.remote_service = get_remote_model_service()
 
     def rerank(
         self,
@@ -65,7 +46,7 @@ class Qwen3RerankerService:
         top_n = max(1, min(int(top_n), 4, len(documents)))
 
         try:
-            reranked_results = self._rerank_with_local(
+            reranked_results = self._rerank_with_remote(
                 query, documents, top_n, instruction
             )
             rerank_context = self._format_rerank_context(documents, reranked_results)
@@ -80,18 +61,15 @@ class Qwen3RerankerService:
             rerank_context = self._format_rerank_context(documents, fallback_results)
             return fallback_results, rerank_context
 
-    def _rerank_with_local(
+    def _rerank_with_remote(
         self,
         query: str,
         documents: List[Dict[str, Any]],
         top_n: int,
         instruction: str,
     ) -> List[Dict[str, Any]]:
-        """Call local GPU service for Qwen3-Reranker-0.6B inference."""
-        if time.time() < self._down_until:
-            raise RuntimeError("Reranker service is temporarily DOWN (circuit breaker)")
-
-        # Truncate to avoid GPU OOM on large medical documents
+        """Call remote model service for Qwen3-Reranker-0.6B inference."""
+        # Truncate to avoid overly large payloads
         MAX_DOC_CHARS = 512
         doc_texts = [
             (
@@ -108,42 +86,7 @@ class Qwen3RerankerService:
             "instruction": instruction,
         }
 
-        response = None
-        last_error: Optional[Exception] = None
-        for attempt in range(self.max_retries + 1):
-            try:
-                response = self.client.post(
-                    f"{self.local_url}/v1/models/rerank",
-                    json=payload,
-                )
-                if response.status_code == 200:
-                    self._failures = 0
-                    break
-
-                if response.status_code < 500 and response.status_code != 429:
-                    raise Exception(f"Reranking failed: {response.status_code}")
-
-                raise Exception(
-                    f"Reranking transient error: {response.status_code}"
-                )
-            except Exception as e:
-                last_error = e
-                self._failures += 1
-                if self._failures > self._failure_threshold:
-                    self._down_until = time.time() + self._down_ttl_seconds
-                    logger.warning(
-                        f"[RERANK][CB] Service marked DOWN for {self._down_ttl_seconds}s"
-                    )
-                if attempt >= self.max_retries:
-                    raise
-                logger.warning(
-                    f"[RERANK] attempt {attempt + 1}/{self.max_retries + 1} failed: {e}."
-                )
-
-        if response is None:
-            raise Exception(f"Reranking failed: {last_error}")
-
-        result = response.json()
+        result = self.remote_service.rerank(payload)
         scores = result["scores"]
         indices = result["indices"]
 
