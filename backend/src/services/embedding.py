@@ -8,48 +8,18 @@ Key Features:
 - Instruction-aware: Queries use task instruction prefix
 - Documents: Indexed without instruction
 - Normalization: Always L2-normalize embeddings
-- Local HTTP: Communicates with serving/qwen3_models/app.py via HTTP
+- Remote HTTP: Communicates with model service via HTTP
 - Caching: Optional query/embedding caching via Redis
-- Local fallback: Uses SentenceTransformer in-process if HTTP service is down
 """
 import hashlib
 import threading
 import time
-from typing import Any, List, Optional
+from typing import List, Optional
 
-import httpx
-import numpy as np
 from loguru import logger
 
 from ..configs.setup import get_backend_settings
-
-# ── Local in-process fallback (lazy-loaded) ──────────────────────────────────
-_local_model: Optional[Any] = None
-_local_model_lock = threading.Lock()
-_local_model_failed = False  # avoid repeated load attempts if it fails once
-
-
-def _get_local_embed_model() -> Optional[Any]:
-    """Lazy-load Qwen3-Embedding-0.6B via SentenceTransformer (in-process fallback)."""
-    global _local_model, _local_model_failed
-    if _local_model_failed:
-        return None
-    if _local_model is not None:
-        return _local_model
-    with _local_model_lock:
-        if _local_model is None and not _local_model_failed:
-            try:
-                from sentence_transformers import SentenceTransformer
-
-                logger.info("[EMBED-LOCAL] Loading Qwen3-Embedding-0.6B in-process (fallback)…")
-                _local_model = SentenceTransformer(
-                    "Qwen/Qwen3-Embedding-0.6B",
-                )
-                logger.success("[EMBED-LOCAL] Local embedding model ready")
-            except Exception as exc:
-                logger.error(f"[EMBED-LOCAL] Failed to load local model: {exc}")
-                _local_model_failed = True
-    return _local_model
+from .remote_model import get_remote_model_service
 
 settings = get_backend_settings()
 
@@ -86,8 +56,7 @@ class Qwen3EmbeddingService:
     """
     Qwen3 Embedding Service following Qwen3-Embedding-0.6B best practices.
 
-    This service communicates with a local HTTP embedding server that runs
-    the SentenceTransformer model Qwen/Qwen3-Embedding-0.6B.
+    This service communicates with a remote HTTP model service for embeddings.
 
     Reference: https://huggingface.co/Qwen/Qwen3-Embedding-0.6B
     """
@@ -99,27 +68,16 @@ class Qwen3EmbeddingService:
 
     def __init__(
         self,
-        local_url: Optional[str] = None,
         task_instruction: Optional[str] = None,
     ):
         """
-        Initialize Qwen3 Embedding Service with local HTTP endpoint.
+        Initialize Qwen3 Embedding Service.
 
         Args:
-            local_url: URL of local embedding service (default from settings)
             task_instruction: Default task instruction for query embedding
         """
-        if settings.qwen3_models_enabled:
-            self.local_url = local_url or settings.qwen3_models_url
-        else:
-            self.local_url = local_url or settings.backend_api_url
-
         self.task_instruction = task_instruction or self.DEFAULT_TASK_INSTRUCTION
-        self.client = httpx.Client(timeout=120.0)
-        self._remote_failures = 0
-        self._remote_down_until = 0.0
-        self._remote_down_ttl_seconds = 60
-        self._remote_failure_threshold = 3
+        self.remote_service = get_remote_model_service()
 
     def embed_query(
         self, query: str, use_cache: bool = True, task_instruction: Optional[str] = None
@@ -152,9 +110,7 @@ class Qwen3EmbeddingService:
                 _mem_set(cache_key, cached_embedding)
                 return cached_embedding
 
-        embedding = self._embed_with_local(
-            texts=[query], is_query=True, instruction=instruction
-        )
+        embedding = self._embed_remote(texts=[query], is_query=True, instruction=instruction)
         if embedding:
             embedding = embedding[0]
 
@@ -176,9 +132,7 @@ class Qwen3EmbeddingService:
         Returns:
             Embedding vector (1024-dim) or None on error
         """
-        embedding = self._embed_with_local(
-            texts=[document], is_query=False, instruction=None
-        )
+        embedding = self._embed_remote(texts=[document], is_query=False, instruction=None)
         return embedding[0] if embedding else None
 
     def embed_text(self, text: str, use_cache: bool = True) -> Optional[List[float]]:
@@ -211,83 +165,31 @@ class Qwen3EmbeddingService:
 
         for i in range(0, len(documents), batch_size):
             batch = documents[i : i + batch_size]
-            batch_embeddings = self._embed_with_local(
-                texts=batch, is_query=False, instruction=None
-            )
+            batch_embeddings = self._embed_remote(texts=batch, is_query=False, instruction=None)
             embeddings.extend(batch_embeddings or [None] * len(batch))
 
         return embeddings
 
-    def _embed_with_local(
+    def _embed_remote(
         self,
         texts: List[str],
         is_query: bool = False,
         instruction: Optional[str] = None,
     ) -> Optional[List[List[float]]]:
-        """
-        Call local HTTP embedding service for inference.
-        Falls back to in-process SentenceTransformer if the HTTP service is down.
-        """
-        now = time.time()
-        remote_available = now >= self._remote_down_until
-
-        # ── Primary path: HTTP service ────────────────────────────────────────
-        if remote_available:
-            try:
-                payload = {
-                    "texts": texts,
-                    "normalize": True,
-                    "is_query": is_query,
-                }
-                if is_query and instruction:
-                    payload["instruction"] = instruction
-
-                response = self.client.post(
-                    f"{self.local_url}/v1/models/embed",
-                    json=payload,
-                )
-
-                if response.status_code == 200:
-                    result = response.json()
-                    self._remote_failures = 0
-                    return result.get("embeddings")
-
-                self._remote_failures += 1
-                logger.error(
-                    f"[EMBED] HTTP service error: {response.status_code} - {response.text}"
-                )
-            except Exception as e:
-                self._remote_failures += 1
-                logger.warning(f"[EMBED] HTTP service unavailable ({e}), trying local fallback…")
-
-            if self._remote_failures > self._remote_failure_threshold:
-                self._remote_down_until = time.time() + self._remote_down_ttl_seconds
-                logger.warning(
-                    f"[EMBED][CB] Remote service marked DOWN for {self._remote_down_ttl_seconds}s"
-                )
-        else:
-            logger.debug("[EMBED][CB] Skip remote call while service is DOWN")
-
-        # ── Fallback path: in-process SentenceTransformer ─────────────────────
-        model = _get_local_embed_model()
-        if model is None:
-            logger.error("[EMBED] Local fallback model also unavailable. Returning None.")
-            return None
+        """Call remote model service for embeddings."""
+        payload = {
+            "texts": texts,
+            "normalize": True,
+            "is_query": is_query,
+        }
+        if is_query and instruction:
+            payload["instruction"] = instruction
 
         try:
-            encode_texts = texts
-            if is_query and instruction:
-                encode_texts = [f"{instruction}: {t}" for t in texts]
-
-            vecs = model.encode(
-                encode_texts,
-                batch_size=32,
-                convert_to_numpy=True,
-                normalize_embeddings=True,
-            )
-            return vecs.tolist()
+            result = self.remote_service.embed(payload)
+            return result.get("embeddings")
         except Exception as exc:
-            logger.error(f"[EMBED] Local fallback encode failed: {exc}")
+            logger.error(f"[EMBED] Remote embedding failed: {exc}")
             return None
 
     def get_embedding_dimension(self) -> int:
@@ -295,13 +197,8 @@ class Qwen3EmbeddingService:
         return settings.vector_dimension
 
     def health_check(self) -> bool:
-        """Check if local embedding service is alive."""
-        try:
-            response = self.client.get(f"{self.local_url}/v1/ready")
-            return response.status_code == 200
-        except Exception as e:
-            logger.error(f"[HEALTH] Error: {e}")
-            return False
+        """Check if remote embedding service is alive."""
+        return self.remote_service.health_check()
 
 
 # Singleton instance
