@@ -260,7 +260,13 @@ def qwen3_chat_complete(
             error_msg = "vLLM service is loading"
         logger.warning(f"[GEN] vLLM failed: {error_msg}")
 
-    return None
+    fallback = ollama_chat_complete(
+        messages=messages,
+        model=None,
+        temperature=temperature,
+        max_tokens=max_tokens,
+    )
+    return fallback
 
 
 def qwen3_chat_stream(
