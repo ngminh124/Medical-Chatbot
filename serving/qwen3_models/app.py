@@ -6,7 +6,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Response
 from fastapi.concurrency import run_in_threadpool
 from loguru import logger
 from pydantic import BaseModel
@@ -85,6 +85,12 @@ class GuardResponse(BaseModel):
 
 
 app = FastAPI(title="Qwen3 Model Service (Lazy · Stable)")
+
+
+@app.get("/metrics")
+def metrics():
+    """Health check endpoint for Docker/monitoring. Returns empty Prometheus metrics."""
+    return Response(content="", media_type="text/plain")
 
 
 def l2_normalize(array: np.ndarray) -> np.ndarray:
