@@ -19,7 +19,7 @@
 models:
   # ── Text Generation (served via vLLM on port 7861) ─────────
   generation:
-    active: "Qwen/Qwen3-4B"
+    active: "./models/qwen3-4b"
     description: "Main LLM for answer generation, served by vLLM"
 
   # ── Embedding (served via GPU service on port 7860) ────────
@@ -44,5 +44,5 @@ models:
 # ── Serving endpoints ───────────────────────────────────────
 serving:
   vllm_url: "http://localhost:7861"
-  vllm_api_key: ""
+  vllm_api_key: "mysecret123"
   embedding_url: "http://localhost:7860"
