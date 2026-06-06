@@ -1,50 +1,71 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODEL="${MODEL:-qwen3:4b}"
+MODEL="${MODEL:-qwen3:8b}"
+HOST="${HOST:-0.0.0.0}"
+PORT="${PORT:-11434}"
 
 echo "========================================="
-echo " Installing Ollama"
+echo " Ollama Startup"
 echo "========================================="
 
+# Check GPU
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+    echo "WARNING: nvidia-smi not found. Ollama may run on CPU."
+else
+    echo "GPU detected:"
+    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+fi
+
+# Install Ollama if missing
 if ! command -v ollama >/dev/null 2>&1; then
+    echo "Installing Ollama..."
     curl -fsSL https://ollama.com/install.sh | sh
 else
     echo "Ollama already installed."
 fi
+
+export OLLAMA_HOST="${HOST}:${PORT}"
 
 echo
 echo "========================================="
 echo " Starting Ollama Server"
 echo "========================================="
 
-export OLLAMA_HOST="0.0.0.0:11434"
+# Start Ollama in background
+ollama serve &
+OLLAMA_PID=$!
 
-if ! pgrep -f "ollama serve" >/dev/null 2>&1; then
-    nohup ollama serve > ollama.log 2>&1 &
-    sleep 5
-else
-    echo "Ollama server already running."
-fi
+cleanup() {
+    echo "Stopping Ollama..."
+    kill ${OLLAMA_PID} 2>/dev/null || true
+}
+
+trap cleanup EXIT INT TERM
 
 echo
 echo "========================================="
 echo " Waiting for Ollama API"
 echo "========================================="
 
-until curl -fs http://127.0.0.1:11434/api/tags >/dev/null 2>&1; do
-    echo "Waiting..."
+until curl -fs "http://127.0.0.1:${PORT}/api/tags" >/dev/null 2>&1; do
+    echo "Waiting for Ollama..."
     sleep 2
 done
 
-echo "Ollama is ready."
+echo "Ollama API ready."
 
 echo
 echo "========================================="
-echo " Downloading Model: ${MODEL}"
+echo " Downloading Model"
 echo "========================================="
 
-ollama pull "${MODEL}"
+if ! ollama list | awk '{print $1}' | grep -qx "${MODEL}"; then
+    echo "Pulling ${MODEL} ..."
+    ollama pull "${MODEL}"
+else
+    echo "Model ${MODEL} already exists."
+fi
 
 echo
 echo "========================================="
@@ -55,20 +76,31 @@ ollama list
 
 echo
 echo "========================================="
-echo " Test Generation"
+echo " Ollama Ready"
 echo "========================================="
 
-ollama run "${MODEL}" "Xin chào, hãy trả lời ngắn gọn rằng mô hình đã hoạt động."
+echo "Model : ${MODEL}"
+echo "Host  : ${HOST}"
+echo "Port  : ${PORT}"
 
 echo
-echo "========================================="
-echo " Setup Complete"
-echo "========================================="
 echo "API Endpoint:"
-echo "http://0.0.0.0:11434"
+echo "http://${HOST}:${PORT}"
+
 echo
-echo "Test API:"
-echo "curl http://localhost:11434/api/tags"
+echo "Health Check:"
+echo "curl http://localhost:${PORT}/api/tags"
+
 echo
-echo "Generate:"
-echo "curl http://localhost:11434/api/generate -d '{\"model\":\"${MODEL}\",\"prompt\":\"Hello\",\"stream\":false}'"
+echo "Generate Example:"
+echo "curl -X POST http://localhost:${PORT}/api/generate \\"
+echo "  -H 'Content-Type: application/json' \\"
+echo "  -d '{\"model\":\"${MODEL}\",\"prompt\":\"Hello\",\"stream\":false}'"
+
+echo
+echo "========================================="
+echo " Ollama Server Running"
+echo "========================================="
+
+# Giữ container/process sống
+wait ${OLLAMA_PID}
