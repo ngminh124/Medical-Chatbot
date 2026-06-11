@@ -20,6 +20,7 @@ pydantic
 
 # HTTP client
 httpx
+httpx[http2]
 
 # OpenAI & Web Search
 openai
@@ -41,6 +42,7 @@ psycopg2-binary
 bcrypt
 python-jose[cryptography]
 pydantic[email]
+google-auth
 
 # Redis cache (optional)
 redis
